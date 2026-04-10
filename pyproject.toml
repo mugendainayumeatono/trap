@@ -1,0 +1,21 @@
+[project]
+name = "trap"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "mysql-connector-python>=9.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "mock>=5.2.0",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "strict"

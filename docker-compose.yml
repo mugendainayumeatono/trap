@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  trap:
+    build: .
+    environment:
+      - STORAGE_TYPE=file # Change to 'mysql' for database storage
+      - LOG_FILE=/var/log/trap/honey.log
+      - LOG_MAX_SIZE_MB=10
+      - LISTEN_PORTS=1080,1081 # Example ports (non-privileged for non-root)
+      - MYSQL_HOST=db
+      - MYSQL_USER=trap_user
+      - MYSQL_PASSWORD=trap_pass
+      - MYSQL_DATABASE=trap
+    volumes:
+      - ./logs:/var/log/trap
+    ports:
+      - "1080:1080"
+      - "1081:1081"
