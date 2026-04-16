@@ -1,6 +1,8 @@
 import asyncio
 import os
 import signal
+import ipaddress
+import re
 from datetime import datetime
 from .storage.file import FileStorage
 from .storage.mysql import MySQLStorage
@@ -10,6 +12,29 @@ class Honeypot:
     def __init__(self):
         self.storage = self._setup_storage()
         self.handlers = [HTTPHandler(), DefaultHandler()]
+        self._setup_trusted_proxies()
+
+    def _setup_trusted_proxies(self):
+        trusted_proxies_env = os.getenv("TRUSTED_PROXIES", "")
+        self.trusted_proxies = []
+        self.trust_all_proxies = (trusted_proxies_env == "*")
+        if trusted_proxies_env and not self.trust_all_proxies:
+            for p in trusted_proxies_env.split(","):
+                try:
+                    self.trusted_proxies.append(ipaddress.ip_network(p.strip()))
+                except ValueError:
+                    pass
+
+    def _is_trusted_proxy(self, ip_str):
+        if self.trust_all_proxies:
+            return True
+        if not self.trusted_proxies or not ip_str:
+            return False
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            return any(ip in net for net in self.trusted_proxies)
+        except ValueError:
+            return False
 
     def _setup_storage(self):
         storage_type = os.getenv("STORAGE_TYPE", "file").lower()
@@ -30,7 +55,20 @@ class Honeypot:
 
     async def handle_connection(self, reader, writer):
         peer = writer.get_extra_info('peername')
-        sender_ip = peer[0] if peer else "unknown"
+        
+        if isinstance(peer, str):
+            normalized_ip = peer
+        elif peer:
+            try:
+                # Normalize IP
+                normalized_ip = str(ipaddress.ip_address(peer[0]))
+            except ValueError:
+                normalized_ip = str(peer[0])
+        else:
+            normalized_ip = "unknown"
+            
+        real_ip = normalized_ip
+        is_first_read = True
         
         # Set session timeout
         try:
@@ -57,6 +95,28 @@ class Honeypot:
                 if not data:
                     break
 
+                if is_first_read and self._is_trusted_proxy(normalized_ip):
+                    if data.startswith(b"PROXY "):
+                        parts = data.split(b"\r\n", 1)[0].split(b" ")
+                        if len(parts) >= 3:
+                            try:
+                                real_ip = str(ipaddress.ip_address(parts[2].decode('ascii')))
+                                if b"\r\n" in data:
+                                    data = data[data.find(b"\r\n") + 2:]
+                            except (ValueError, UnicodeDecodeError):
+                                pass
+                    elif b"HTTP/" in data:
+                        try:
+                            headers_part = data.split(b"\r\n\r\n", 1)[0].decode('ascii', errors='ignore')
+                            match = re.search(r'(?i)\r\n(?:X-Forwarded-For|X-Real-IP):\s*([^\r\n]+)', headers_part)
+                            if match:
+                                ips = [ip.strip() for ip in match.group(1).split(',')]
+                                if ips:
+                                    real_ip = str(ipaddress.ip_address(ips[0]))
+                        except (ValueError, IndexError):
+                            pass
+                is_first_read = False
+
                 timestamp = datetime.now()
                 protocol_name = "unknown"
                 decoded_content = ""
@@ -67,7 +127,7 @@ class Honeypot:
                         protocol_name, decoded_content, response = handler.handle(data)
                         break
 
-                self.storage.record(timestamp, sender_ip, data, decoded_content, protocol_name)
+                self.storage.record(timestamp, real_ip, data, decoded_content, protocol_name)
                 
                 if response:
                     writer.write(response)
@@ -77,7 +137,7 @@ class Honeypot:
                 if asyncio.get_event_loop().time() >= end_time:
                     break
         except Exception as e:
-            print(f"Error handling connection from {sender_ip}: {e}")
+            print(f"Error handling connection from {real_ip}: {e}")
         finally:
             try:
                 writer.close()
