@@ -8,6 +8,7 @@ services:
       - LOG_FILE=/var/log/trap/honey.log
       - LOG_MAX_SIZE_MB=10
       - LISTEN_PORTS=1080,1081 # Example ports (non-privileged for non-root)
+      - TRUSTED_PROXIES=127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 # Trust private network ranges
       - MYSQL_HOST=db
       - MYSQL_USER=trap_user
       - MYSQL_PASSWORD=trap_pass
