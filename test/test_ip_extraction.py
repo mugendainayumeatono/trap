@@ -78,3 +78,19 @@ async def test_trust_all_proxies(monkeypatch, tmp_path):
     
     args = hp.storage.record.call_args[0]
     assert args[1] == "8.8.8.8"
+
+@pytest.mark.asyncio
+async def test_newline_only_headers(mock_honeypot):
+    reader = AsyncMock()
+    # Using only \n instead of \r\n
+    reader.read.side_effect = [b"GET / HTTP/1.1\nHost: example.com\nX-Forwarded-For: 1.1.1.1\n\n", b""]
+    
+    writer = MagicMock()
+    writer.get_extra_info.return_value = ("10.0.0.5", 12345)
+    writer.drain = AsyncMock()
+    writer.wait_closed = AsyncMock()
+    
+    await mock_honeypot.handle_connection(reader, writer)
+    
+    args = mock_honeypot.storage.record.call_args[0]
+    assert args[1] == "1.1.1.1"

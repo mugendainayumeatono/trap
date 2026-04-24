@@ -17,6 +17,7 @@ Use environment variables in `docker-compose.yml`:
 - `LOG_FILE`: Path to the log file (for `file` storage).
 - `LOG_MAX_SIZE_MB`: Max size of log file before rotation.
 - `LISTEN_PORTS`: Comma-separated list of ports to listen on inside the container.
+- `TRUSTED_PROXIES`: Comma-separated list of IP ranges (e.g., `10.0.0.0/8,192.168.1.100`) to trust for `X-Forwarded-For`, `X-Real-IP`, and `PROXY` protocol. Use `*` to trust all proxies (useful in cloud environments with dynamic load balancer IPs).
 - `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`: MySQL connection details.
 
 ## Usage

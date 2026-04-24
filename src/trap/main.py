@@ -97,18 +97,29 @@ class Honeypot:
 
                 if is_first_read and self._is_trusted_proxy(normalized_ip):
                     if data.startswith(b"PROXY "):
-                        parts = data.split(b"\r\n", 1)[0].split(b" ")
-                        if len(parts) >= 3:
-                            try:
-                                real_ip = str(ipaddress.ip_address(parts[2].decode('ascii')))
-                                if b"\r\n" in data:
-                                    data = data[data.find(b"\r\n") + 2:]
-                            except (ValueError, UnicodeDecodeError):
-                                pass
+                        line_end = data.find(b"\r\n")
+                        if line_end == -1:
+                            line_end = data.find(b"\n")
+                        
+                        if line_end != -1:
+                            parts = data[:line_end].split(b" ")
+                            if len(parts) >= 3:
+                                try:
+                                    real_ip = str(ipaddress.ip_address(parts[2].decode('ascii')))
+                                    data = data[line_end + (2 if data[line_end:line_end+2] == b"\r\n" else 1):]
+                                except (ValueError, UnicodeDecodeError):
+                                    pass
                     elif b"HTTP/" in data:
                         try:
-                            headers_part = data.split(b"\r\n\r\n", 1)[0].decode('ascii', errors='ignore')
-                            match = re.search(r'(?i)\r\n(?:X-Forwarded-For|X-Real-IP):\s*([^\r\n]+)', headers_part)
+                            # Handle both \r\n\r\n and \n\n as header separators
+                            headers_end = data.find(b"\r\n\r\n")
+                            if headers_end == -1:
+                                headers_end = data.find(b"\n\n")
+                            
+                            headers_part = data[:headers_end].decode('ascii', errors='ignore') if headers_end != -1 else data.decode('ascii', errors='ignore')
+                            
+                            # Match X-Forwarded-For or X-Real-IP with either \r\n or \n line endings
+                            match = re.search(r'(?i)(?:\r\n|\n)(?:X-Forwarded-For|X-Real-IP):\s*([^\r\n]+)', headers_part)
                             if match:
                                 ips = [ip.strip() for ip in match.group(1).split(',')]
                                 if ips:
