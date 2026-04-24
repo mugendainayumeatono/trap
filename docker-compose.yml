@@ -3,6 +3,8 @@ version: '3.8'
 services:
   trap:
     build: .
+    init: true
+    restart: "no"
     environment:
       - STORAGE_TYPE=file # Change to 'mysql' for database storage
       - LOG_FILE=/var/log/trap/honey.log
@@ -15,6 +17,7 @@ services:
       - MYSQL_DATABASE=trap
     volumes:
       - ./logs:/var/log/trap
+      - ./src:/app/src:ro
     ports:
       - "1080:1080"
       - "1081:1081"
