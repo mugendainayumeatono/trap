@@ -170,6 +170,9 @@ async def test_integration_server(tmp_path):
     except asyncio.CancelledError:
         pass
     
+    # Give the run_in_executor thread a moment to finish writing
+    await asyncio.sleep(0.1)
+    
     # Check log file
     assert os.path.exists(log_file)
     with open(log_file, "r") as f:

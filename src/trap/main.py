@@ -46,9 +46,15 @@ class Honeypot:
                 database=os.getenv("MYSQL_DATABASE", "trap")
             )
         else:
+            try:
+                max_size_mb = float(os.getenv("LOG_MAX_SIZE_MB", "10"))
+            except ValueError:
+                print("Warning: Invalid LOG_MAX_SIZE_MB value. Defaulting to 10MB.")
+                max_size_mb = 10.0
+                
             storage = FileStorage(
                 file_path=os.getenv("LOG_FILE", "/var/log/trap/honey.log"),
-                max_size_mb=float(os.getenv("LOG_MAX_SIZE_MB", "10"))
+                max_size_mb=max_size_mb
             )
         storage.setup()
         return storage
@@ -107,9 +113,13 @@ class Honeypot:
                                 try:
                                     real_ip = str(ipaddress.ip_address(parts[2].decode('ascii')))
                                     data = data[line_end + (2 if data[line_end:line_end+2] == b"\r\n" else 1):]
+                                    if not data:
+                                        is_first_read = False
+                                        continue
                                 except (ValueError, UnicodeDecodeError):
                                     pass
-                    elif b"HTTP/" in data:
+                    
+                    if b"HTTP/" in data:
                         try:
                             # Handle both \r\n\r\n and \n\n as header separators
                             headers_end = data.find(b"\r\n\r\n")
@@ -118,8 +128,8 @@ class Honeypot:
                             
                             headers_part = data[:headers_end].decode('ascii', errors='ignore') if headers_end != -1 else data.decode('ascii', errors='ignore')
                             
-                            # Match X-Forwarded-For or X-Real-IP with either \r\n or \n line endings
-                            match = re.search(r'(?i)(?:\r\n|\n)(?:X-Forwarded-For|X-Real-IP):\s*([^\r\n]+)', headers_part)
+                            # Match X-Forwarded-For or X-Real-IP at start of string or after newline
+                            match = re.search(r'(?i)(?:^|[\r\n])(?:X-Forwarded-For|X-Real-IP):\s*([^\r\n]+)', headers_part)
                             if match:
                                 ips = [ip.strip() for ip in match.group(1).split(',')]
                                 if ips:
@@ -143,7 +153,12 @@ class Honeypot:
                     await writer.drain()
 
                 try:
-                    self.storage.record(timestamp, real_ip, data, decoded_content, protocol_name)
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None, 
+                        self.storage.record, 
+                        timestamp, real_ip, data, decoded_content, protocol_name
+                    )
                 except Exception as e:
                     print(f"Error recording connection from {real_ip}: {e}")
                 
@@ -160,7 +175,12 @@ class Honeypot:
                 pass
 
     async def listen(self, host, port):
-        server = await asyncio.start_server(self.handle_connection, host, port)
+        try:
+            server = await asyncio.start_server(self.handle_connection, host, port)
+        except OSError as e:
+            print(f"Error: Failed to bind to {host}:{port} - {e}")
+            return
+            
         addr = server.sockets[0].getsockname()
         print(f"Listening on {addr}")
         async with server:
@@ -171,8 +191,16 @@ async def main():
     honeypot = Honeypot()
     tasks = []
     for port in ports:
-        tasks.append(honeypot.listen('0.0.0.0', int(port.strip())))
+        try:
+            p = int(port.strip())
+            tasks.append(honeypot.listen('0.0.0.0', p))
+        except ValueError:
+            print(f"Warning: Invalid port '{port.strip()}'. Skipping.")
     
+    if not tasks:
+        print("Error: No valid ports configured. Exiting.")
+        return
+
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
