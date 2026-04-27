@@ -138,11 +138,14 @@ class Honeypot:
                         protocol_name, decoded_content, response = handler.handle(data)
                         break
 
-                self.storage.record(timestamp, real_ip, data, decoded_content, protocol_name)
-                
                 if response:
                     writer.write(response)
                     await writer.drain()
+
+                try:
+                    self.storage.record(timestamp, real_ip, data, decoded_content, protocol_name)
+                except Exception as e:
+                    print(f"Error recording connection from {real_ip}: {e}")
                 
                 # If we have reached the session timeout after writing, break
                 if asyncio.get_event_loop().time() >= end_time:
