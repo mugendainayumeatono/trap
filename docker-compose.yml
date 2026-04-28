@@ -10,6 +10,7 @@ services:
       - STORAGE_TYPE=file # Change to 'mysql' for database storage
       - LOG_FILE=/var/log/trap/honey.log
       - LOG_MAX_SIZE_MB=10
+      - LOG_MAX_DAYS=7 # Create a new log file every 7 days or when size reaches 10MB
       - LISTEN_PORTS=1080,1081 # Example ports (non-privileged for non-root)
       - TRUSTED_PROXIES=127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 # Trust private network ranges
       - TLS_CERT_PATH=/app/certs/cert.der

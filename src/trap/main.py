@@ -53,9 +53,16 @@ class Honeypot:
                 print("Warning: Invalid LOG_MAX_SIZE_MB value. Defaulting to 10MB.")
                 max_size_mb = 10.0
                 
+            try:
+                max_days = float(os.getenv("LOG_MAX_DAYS", "0"))
+            except ValueError:
+                print("Warning: Invalid LOG_MAX_DAYS value. Defaulting to 0 (disabled).")
+                max_days = 0.0
+                
             storage = FileStorage(
                 file_path=os.getenv("LOG_FILE", "/var/log/trap/honey.log"),
-                max_size_mb=max_size_mb
+                max_size_mb=max_size_mb,
+                max_days=max_days
             )
         storage.setup()
         return storage
