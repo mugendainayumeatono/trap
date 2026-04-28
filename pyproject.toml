@@ -3,10 +3,13 @@ name = "trap"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "cryptography>=47.0.0",
     "mysql-connector-python>=9.4.0",
+    "mcp>=1.2.1",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
 ]
 
 [dependency-groups]

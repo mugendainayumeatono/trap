@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "trap-logs": {
+      "command": "docker exec -i -e MCP_HTTP_ENABLED=false trap_mcp_1 python -m src.trap.mcp_server",
+      "args": []
+    }
+  }
+}
