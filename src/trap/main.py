@@ -7,11 +7,12 @@ from datetime import datetime
 from .storage.file import FileStorage
 from .storage.mysql import MySQLStorage
 from .handlers.default import DefaultHandler, HTTPHandler
+from .handlers.tls import TLSHandler
 
 class Honeypot:
     def __init__(self):
         self.storage = self._setup_storage()
-        self.handlers = [HTTPHandler(), DefaultHandler()]
+        self.handlers = [TLSHandler(), HTTPHandler(), DefaultHandler()]
         self._setup_trusted_proxies()
 
     def _setup_trusted_proxies(self):
@@ -74,6 +75,8 @@ class Honeypot:
             normalized_ip = "unknown"
             
         real_ip = normalized_ip
+        session_id = f"{normalized_ip}:{peer[1]}" if peer and not isinstance(peer, str) else normalized_ip
+        current_handler = None
         is_first_read = True
         
         # Set session timeout
@@ -143,10 +146,14 @@ class Honeypot:
                 decoded_content = ""
                 response = b""
 
-                for handler in self.handlers:
-                    if handler.identify(data):
-                        protocol_name, decoded_content, response = handler.handle(data)
-                        break
+                if current_handler:
+                    protocol_name, decoded_content, response = current_handler.handle(data, session_id)
+                else:
+                    for handler in self.handlers:
+                        if handler.identify(data):
+                            current_handler = handler
+                            protocol_name, decoded_content, response = handler.handle(data, session_id)
+                            break
 
                 if response:
                     writer.write(response)
@@ -168,6 +175,11 @@ class Honeypot:
         except Exception as e:
             print(f"Error handling connection from {real_ip}: {e}")
         finally:
+            if current_handler and hasattr(current_handler, 'cleanup'):
+                try:
+                    current_handler.cleanup(session_id)
+                except Exception as cleanup_err:
+                    print(f"Error during handler cleanup for {real_ip}: {cleanup_err}")
             try:
                 writer.close()
                 await writer.wait_closed()

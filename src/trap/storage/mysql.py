@@ -14,48 +14,48 @@ class MySQLStorage(Storage):
         self.pool = None
 
     def setup(self):
-        # Create database first (without database selected)
-        conn = mysql.connector.connect(
-            host=self.config['host'],
-            user=self.config['user'],
-            password=self.config['password']
-        )
-        cursor = conn.cursor()
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.config['database']}")
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        # Now create the connection pool targeting the specific database
         try:
+            # Create database first (without database selected)
+            conn = mysql.connector.connect(
+                host=self.config['host'],
+                user=self.config['user'],
+                password=self.config['password']
+            )
+            cursor = conn.cursor()
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.config['database']}")
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            # Now create the connection pool targeting the specific database
             self.pool = mysql.connector.pooling.MySQLConnectionPool(
                 pool_name="trap_pool",
                 pool_size=5,
                 pool_reset_session=True,
                 **self.config
             )
-        except mysql.connector.Error as err:
-            print(f"Error creating connection pool: {err}")
-            raise
 
-        # Table structure designed for extensibility and AI analysis
-        conn = self.pool.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS records (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                timestamp DATETIME,
-                sender_ip VARCHAR(45),
-                protocol VARCHAR(50),
-                content_hex LONGTEXT,
-                decoded_content LONGTEXT,
-                metadata JSON,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-        cursor.close()
-        conn.close()
+            # Table structure designed for extensibility and AI analysis
+            conn = self.pool.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS records (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    timestamp DATETIME,
+                    sender_ip VARCHAR(45),
+                    protocol VARCHAR(50),
+                    content_hex LONGTEXT,
+                    decoded_content LONGTEXT,
+                    metadata JSON,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as err:
+            print(f"Error during MySQL setup (will retry lazily later): {err}")
+            self.pool = None
 
     def record(self, timestamp: datetime, sender_ip: str, content: bytes, decoded_content: str, protocol: str):
         if not self.pool:

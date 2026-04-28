@@ -5,7 +5,7 @@ class DefaultHandler(ProtocolHandler):
     def identify(self, data: bytes) -> bool:
         return True
 
-    def handle(self, data: bytes) -> tuple[str, str, bytes]:
+    def handle(self, data: bytes, session_id: str = "") -> tuple[str, str, bytes]:
         try:
             decoded = data.decode('utf-8', errors='replace')
         except:
@@ -17,7 +17,7 @@ class HTTPHandler(ProtocolHandler):
         # Simple HTTP check
         return any(verb in data for verb in [b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ", b"OPTIONS "])
 
-    def handle(self, data: bytes) -> tuple[str, str, bytes]:
+    def handle(self, data: bytes, session_id: str = "") -> tuple[str, str, bytes]:
         try:
             decoded = data.decode('utf-8', errors='replace')
         except:
