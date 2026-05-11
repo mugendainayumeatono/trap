@@ -3,7 +3,8 @@ import json
 import asyncio
 import uvicorn
 import sys
-from datetime import datetime
+import glob
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Request
 from mcp.server import Server
@@ -19,40 +20,60 @@ def log_error(msg):
 
 def fetch_logs_from_file(start_time: datetime, end_time: Optional[datetime] = None, limit: int = 1000) -> List[Dict[str, Any]]:
     """
-    从日志文件中搜索指定时间范围内的记录。
+    从日志文件及其历史轮转文件中搜索指定时间范围内的记录。
     """
     results = []
-    if not os.path.exists(LOG_FILE):
-        return results
+    
+    # 查找所有匹配的文件（当前的和轮转后的）
+    log_pattern = LOG_FILE + "*"
+    all_files = glob.glob(log_pattern)
+    all_files = [f for f in all_files if os.path.isfile(f)]
+    
+    # 按修改时间从新到旧排序，以便先处理最新的日志
+    all_files.sort(key=os.path.getmtime, reverse=True)
 
-    try:
-        with open(LOG_FILE, 'r') as f:
-            for line in f:
-                if len(results) >= limit:
-                    break
-                    
-                try:
-                    entry = json.loads(line)
-                    entry_time = datetime.fromisoformat(entry['timestamp'])
-                    
-                    # 统一转换为 naive datetime 进行比较，防止 aware 和 naive 混用导致的 TypeError
-                    if entry_time.tzinfo is not None:
-                        entry_time = entry_time.replace(tzinfo=None)
-                    
-                    # 确保 start_time 和 end_time 也是 naive
-                    search_start = start_time.replace(tzinfo=None) if start_time.tzinfo is not None else start_time
-                    search_end = end_time.replace(tzinfo=None) if end_time and end_time.tzinfo is not None else end_time
-                    
-                    if entry_time >= search_start:
-                        if search_end is None or entry_time <= search_end:
-                            results.append(entry)
-                        elif entry_time > search_end:
-                            # 假设日志是按时间顺序排列的，如果超过了 end_time，可以提前退出
-                            break
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    continue
-    except Exception as e:
-        log_error(f"Error reading log file: {e}")
+    # 预先处理搜索范围，统一转换为 UTC aware 对象
+    def to_utc_aware(dt: Optional[datetime]):
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.astimezone(timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    utc_start = to_utc_aware(start_time)
+    utc_end = to_utc_aware(end_time)
+
+    for file_path in all_files:
+        if len(results) >= limit:
+            break
+            
+        try:
+            with open(file_path, 'r') as f:
+                # 注意：由于我们是从新到旧处理文件，且单个文件内通常是按时间顺序增加的
+                # 但如果我们想要全局按时间倒序或顺序，这里需要稍微调整。
+                # 目前逻辑是：读取文件，符合条件的加入列表。
+                lines = f.readlines()
+                # 如果是按文件从新到旧读，文件内部也倒序读，就能得到全局倒序
+                for line in reversed(lines):
+                    if len(results) >= limit:
+                        break
+                        
+                    try:
+                        entry = json.loads(line)
+                        entry_time = datetime.fromisoformat(entry['timestamp'])
+                        
+                        if entry_time.tzinfo is None:
+                            entry_time = entry_time.astimezone(timezone.utc)
+                        else:
+                            entry_time = entry_time.astimezone(timezone.utc)
+                        
+                        if entry_time >= utc_start:
+                            if utc_end is None or entry_time <= utc_end:
+                                results.append(entry)
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        continue
+        except Exception as e:
+            log_error(f"Error reading log file {file_path}: {e}")
         
     return results
 
@@ -117,10 +138,10 @@ sse_transport = SseServerTransport("/messages")
 
 @sse_app.get("/sse")
 async def sse_endpoint(request: Request):
-    async with sse_transport.connect_sse(request.scope, request.receive, request._send) as sse:
+    async with sse_transport.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
         await mcp_app.run(
-            sse.read_stream,
-            sse.write_stream,
+            read_stream,
+            write_stream,
             mcp_app.create_initialization_options()
         )
 

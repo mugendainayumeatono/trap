@@ -30,9 +30,16 @@ class CombinedRotatingHandler(logging.handlers.RotatingFileHandler):
             except Exception:
                 pass
             
-            # 如果读取失败，则回退到 mtime
+            # 如果读取失败，尝试使用 ctime (在 Linux 上是元数据改变时间，在 Windows 上是创建时间)
+            # 虽然 ctime 在 Linux 上也会随修改而更新，但它依然比 mtime 相对更早一点（在某些边缘情况下）
+            # 最理想的情况是上面的 "读取首行时间戳" 逻辑。
             if creation_time is None:
-                creation_time = os.path.getmtime(self.baseFilename)
+                try:
+                    # 某些系统支持 birthtime
+                    creation_time = os.stat(self.baseFilename).st_birthtime
+                except AttributeError:
+                    # 回退到 ctime (Linux 下通常等同于最后一次修改元数据的时间)
+                    creation_time = os.path.getctime(self.baseFilename)
         else:
             creation_time = time.time()
             

@@ -3,7 +3,7 @@ import os
 import signal
 import ipaddress
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from .storage.file import FileStorage
 from .storage.mysql import MySQLStorage
 from .handlers.default import DefaultHandler, HTTPHandler
@@ -149,7 +149,7 @@ class Honeypot:
                             pass
                 is_first_read = False
 
-                timestamp = datetime.now()
+                timestamp = datetime.now(timezone.utc)
                 protocol_name = "unknown"
                 decoded_content = ""
                 response = b""
