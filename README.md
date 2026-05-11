@@ -31,20 +31,20 @@ Use environment variables in `docker-compose.yml`:
 Trap includes a built-in MCP service that allows AI agents to fetch and analyze honeypot logs. It runs alongside the main honeypot process and supports two modes:
 
 ### 1. HTTP REST API
-A simple JSON API to query logs by time range.
+A simple JSON API to query logs by time range with pagination support.
 - **Endpoint**: `GET http://<host>:8088/logs`
 - **Parameters**: 
     - `start_time` (Required): ISO 8601 format.
     - `end_time` (Optional): ISO 8601 format.
-- **Example**: `curl "http://localhost:8088/logs?start_time=2026-05-10T00:00:00"`
+    - `limit` (Optional): Max entries to return (default: 100).
+    - `offset` (Optional): Entries to skip (default: 0).
+- **Example**: `curl "http://localhost:8088/logs?start_time=2026-05-10T00:00:00&limit=50"`
 
 ### 2. MCP SSE Server
 A standard MCP Server implementation using Server-Sent Events.
 - **Endpoint**: `http://<host>:8089/sse`
-- **Tool**: `fetch_logs(start_time, end_time)`
-- **Note**: This mode is ideal for connecting Trap directly to MCP-compatible IDEs or agents.
-
-*Note: Both modes return a maximum of 1000 entries per request to ensure performance.*
+- **Tool**: `fetch_logs(start_time, end_time, limit, offset)`
+- **Note**: Returns a structured JSON containing `logs`, `total` count, and a `has_more` flag for easy batching.
 
 ## Usage
 
