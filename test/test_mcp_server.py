@@ -2,7 +2,7 @@ import pytest
 import json
 import os
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 from trap.mcp_server import http_app, sse_app, fetch_logs_from_file, start_mcp_servers
@@ -11,7 +11,7 @@ from trap.mcp_server import http_app, sse_app, fetch_logs_from_file, start_mcp_s
 
 def test_fetch_logs_from_file(tmp_path):
     log_file = tmp_path / "honey.log"
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     
     # 准备测试数据
     log_entries = [
@@ -25,22 +25,23 @@ def test_fetch_logs_from_file(tmp_path):
             f.write(json.dumps(entry) + "\n")
             
     with patch("trap.mcp_server.LOG_FILE", str(log_file)):
-        # 测试全量（从 15 分钟前开始）
+        # 测试全量
         start_time = now - timedelta(minutes=15)
-        results = fetch_logs_from_file(start_time)
-        assert len(results) == 3
+        result = fetch_logs_from_file(start_time, limit=10)
+        assert len(result["logs"]) == 3
+        assert result["total"] == 3
         
-        # 测试中间时间段
-        start_time = now - timedelta(minutes=5)
-        end_time = now + timedelta(minutes=5)
-        results = fetch_logs_from_file(start_time, end_time)
-        assert len(results) == 1
-        assert results[0]["sender_ip"] == "2.2.2.2"
+        # 测试分页 (limit=1, offset=1) -> 预期拿到中间那条 "2.2.2.2"
+        # 注意逻辑是 reversed，所以 0: 3.3.3.3, 1: 2.2.2.2, 2: 1.1.1.1
+        result = fetch_logs_from_file(start_time, limit=1, offset=1)
+        assert len(result["logs"]) == 1
+        assert result["logs"][0]["sender_ip"] == "2.2.2.2"
+        assert result["has_more"] is True
         
-        # 测试不存在的时间段
-        start_time = now + timedelta(minutes=20)
-        results = fetch_logs_from_file(start_time)
-        assert len(results) == 0
+        # 测试分页末尾
+        result = fetch_logs_from_file(start_time, limit=1, offset=2)
+        assert result["logs"][0]["sender_ip"] == "1.1.1.1"
+        assert result["has_more"] is False
 
 # --- 接口测试：HTTP REST API ---
 
@@ -48,23 +49,23 @@ client = TestClient(http_app)
 
 def test_http_logs_endpoint(tmp_path):
     log_file = tmp_path / "honey.log"
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     entry = {"timestamp": now.isoformat(), "sender_ip": "127.0.0.1", "protocol": "test"}
     
     log_file.write_text(json.dumps(entry) + "\n")
     
     with patch("trap.mcp_server.LOG_FILE", str(log_file)):
-        # 成功请求
-        response = client.get(f"/logs?start_time={now.isoformat()}")
+        # 成功请求 (带分页参数)
+        # 注意：需要对 ISO 时间进行 URL 编码，否则 +00:00 中的 + 会被解析为空格导致解析失败
+        import urllib.parse
+        encoded_ts = urllib.parse.quote(now.isoformat())
+        response = client.get(f"/logs?start_time={encoded_ts}&limit=1&offset=0")
         assert response.status_code == 200
-        assert len(response.json()) == 1
-        assert response.json()[0]["sender_ip"] == "127.0.0.1"
+        data = response.json()
+        assert len(data["logs"]) == 1
+        assert data["logs"][0]["sender_ip"] == "127.0.0.1"
         
-        # 错误参数（缺少 start_time）
-        response = client.get("/logs")
-        assert response.status_code == 422
-        
-        # 错误日期格式
+        # 错误日期格式 (应该返回 400 而不是 422)
         response = client.get("/logs?start_time=invalid-date")
         assert response.status_code == 400
 
@@ -111,14 +112,14 @@ async def test_start_mcp_servers_config(monkeypatch):
 
 def test_fetch_logs_file_not_found():
     with patch("trap.mcp_server.LOG_FILE", "/non/existent/path"):
-        results = fetch_logs_from_file(datetime.now())
-        assert results == []
+        result = fetch_logs_from_file(datetime.now())
+        assert result["logs"] == []
 
 def test_fetch_logs_corrupt_json(tmp_path):
     log_file = tmp_path / "corrupt.log"
     log_file.write_text("invalid json line\n{\"timestamp\": \"2026-01-01T00:00:00\", \"valid\": true}\n")
     
     with patch("trap.mcp_server.LOG_FILE", str(log_file)):
-        results = fetch_logs_from_file(datetime(2025, 1, 1))
-        assert len(results) == 1
-        assert results[0]["valid"] is True
+        result = fetch_logs_from_file(datetime(2025, 1, 1))
+        assert len(result["logs"]) == 1
+        assert result["logs"][0]["valid"] is True

@@ -18,9 +18,14 @@ LOG_FILE = os.getenv("LOG_FILE", "/var/log/trap/honey.log")
 def log_error(msg):
     print(msg, file=sys.stderr)
 
-def fetch_logs_from_file(start_time: datetime, end_time: Optional[datetime] = None, limit: int = 1000) -> List[Dict[str, Any]]:
+def fetch_logs_from_file(
+    start_time: datetime, 
+    end_time: Optional[datetime] = None, 
+    limit: int = 100, 
+    offset: int = 0
+) -> Dict[str, Any]:
     """
-    从日志文件及其历史轮转文件中搜索指定时间范围内的记录。
+    从日志文件及其历史轮转文件中搜索指定时间范围内的记录，支持分页。
     """
     results = []
     
@@ -29,53 +34,53 @@ def fetch_logs_from_file(start_time: datetime, end_time: Optional[datetime] = No
     all_files = glob.glob(log_pattern)
     all_files = [f for f in all_files if os.path.isfile(f)]
     
-    # 按修改时间从新到旧排序，以便先处理最新的日志
+    # 按修改时间从新到旧排序
     all_files.sort(key=os.path.getmtime, reverse=True)
 
-    # 预先处理搜索范围，统一转换为 UTC aware 对象
     def to_utc_aware(dt: Optional[datetime]):
-        if dt is None:
-            return None
-        if dt.tzinfo is None:
-            return dt.astimezone(timezone.utc)
-        return dt.astimezone(timezone.utc)
+        if dt is None: return None
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
     utc_start = to_utc_aware(start_time)
     utc_end = to_utc_aware(end_time)
 
+    skipped = 0
+    found_count = 0
+
     for file_path in all_files:
-        if len(results) >= limit:
-            break
-            
         try:
             with open(file_path, 'r') as f:
-                # 注意：由于我们是从新到旧处理文件，且单个文件内通常是按时间顺序增加的
-                # 但如果我们想要全局按时间倒序或顺序，这里需要稍微调整。
-                # 目前逻辑是：读取文件，符合条件的加入列表。
                 lines = f.readlines()
-                # 如果是按文件从新到旧读，文件内部也倒序读，就能得到全局倒序
                 for line in reversed(lines):
-                    if len(results) >= limit:
-                        break
-                        
                     try:
                         entry = json.loads(line)
-                        entry_time = datetime.fromisoformat(entry['timestamp'])
+                        # 兼容处理带 Z 的 ISO 格式 (Python < 3.11)
+                        ts_str = entry['timestamp'].replace('Z', '+00:00')
+                        entry_time = datetime.fromisoformat(ts_str)
                         
                         if entry_time.tzinfo is None:
-                            entry_time = entry_time.astimezone(timezone.utc)
-                        else:
-                            entry_time = entry_time.astimezone(timezone.utc)
+                            entry_time = entry_time.replace(tzinfo=timezone.utc)
                         
-                        if entry_time >= utc_start:
-                            if utc_end is None or entry_time <= utc_end:
+                        if entry_time >= utc_start and (utc_end is None or entry_time <= utc_end):
+                            found_count += 1
+                            if skipped < offset:
+                                skipped += 1
+                                continue
+                            
+                            if len(results) < limit:
                                 results.append(entry)
                     except (json.JSONDecodeError, KeyError, ValueError):
                         continue
         except Exception as e:
             log_error(f"Error reading log file {file_path}: {e}")
         
-    return results
+    return {
+        "logs": results,
+        "total": found_count,
+        "limit": limit,
+        "offset": offset,
+        "has_more": found_count > (offset + len(results))
+    }
 
 # --- MCP Server 定义 ---
 
@@ -86,12 +91,14 @@ async def list_tools() -> List[types.Tool]:
     return [
         types.Tool(
             name="fetch_logs",
-            description="Fetch honeypot logs for a specific time range",
+            description="Fetch honeypot logs for a specific time range with pagination",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "start_time": {"type": "string", "description": "ISO 8601 start time (e.g. 2026-04-28T12:00:00)"},
                     "end_time": {"type": "string", "description": "ISO 8601 end time (optional)"},
+                    "limit": {"type": "integer", "description": "Maximum number of logs to return (default: 100)", "default": 100},
+                    "offset": {"type": "integer", "description": "Number of logs to skip (default: 0)", "default": 0},
                 },
                 "required": ["start_time"],
             },
@@ -104,12 +111,18 @@ async def call_tool(name: str, arguments: Any) -> List[types.TextContent]:
         try:
             start_str = arguments.get("start_time")
             end_str = arguments.get("end_time")
+            limit = int(arguments.get("limit", 100))
+            offset = int(arguments.get("offset", 0))
             
-            start_time = datetime.fromisoformat(start_str)
-            end_time = datetime.fromisoformat(end_str) if end_str else None
+            # 健壮的时间解析
+            def parse_ts(ts_str):
+                return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+
+            start_time = parse_ts(start_str)
+            end_time = parse_ts(end_str) if end_str else None
             
-            logs = fetch_logs_from_file(start_time, end_time)
-            return [types.TextContent(type="text", text=json.dumps(logs, indent=2))]
+            result_data = fetch_logs_from_file(start_time, end_time, limit, offset)
+            return [types.TextContent(type="text", text=json.dumps(result_data, indent=2))]
         except Exception as e:
             return [types.TextContent(type="text", text=f"Error: {str(e)}")]
     
@@ -122,14 +135,19 @@ http_app = FastAPI(title="Log Fetcher REST API")
 @http_app.get("/logs")
 async def get_logs(
     start_time: str = Query(..., description="ISO 8601 start time"),
-    end_time: Optional[str] = Query(None, description="ISO 8601 end time")
+    end_time: Optional[str] = Query(None, description="ISO 8601 end time"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0)
 ):
     try:
-        start_dt = datetime.fromisoformat(start_time)
-        end_dt = datetime.fromisoformat(end_time) if end_time else None
-        return fetch_logs_from_file(start_dt, end_dt)
+        def parse_ts(ts_str):
+            return datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+            
+        start_dt = parse_ts(start_time)
+        end_dt = parse_ts(end_time) if end_time else None
+        return fetch_logs_from_file(start_dt, end_dt, limit, offset)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid date format: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid parameters: {e}")
 
 # --- SSE Mode (MCP SSE) ---
 
