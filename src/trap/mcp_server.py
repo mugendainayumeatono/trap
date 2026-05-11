@@ -2,13 +2,12 @@ import os
 import json
 import asyncio
 import uvicorn
-import threading
 import sys
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
+from mcp.server.sse import SseServerTransport
 import mcp.types as types
 
 # --- 核心逻辑：日志搜索 ---
@@ -18,7 +17,7 @@ LOG_FILE = os.getenv("LOG_FILE", "/var/log/trap/honey.log")
 def log_error(msg):
     print(msg, file=sys.stderr)
 
-def fetch_logs_from_file(start_time: datetime, end_time: Optional[datetime] = None) -> List[Dict[str, Any]]:
+def fetch_logs_from_file(start_time: datetime, end_time: Optional[datetime] = None, limit: int = 1000) -> List[Dict[str, Any]]:
     """
     从日志文件中搜索指定时间范围内的记录。
     """
@@ -29,15 +28,27 @@ def fetch_logs_from_file(start_time: datetime, end_time: Optional[datetime] = No
     try:
         with open(LOG_FILE, 'r') as f:
             for line in f:
+                if len(results) >= limit:
+                    break
+                    
                 try:
                     entry = json.loads(line)
                     entry_time = datetime.fromisoformat(entry['timestamp'])
                     
-                    if entry_time >= start_time:
-                        if end_time is None or entry_time <= end_time:
+                    # 统一转换为 naive datetime 进行比较，防止 aware 和 naive 混用导致的 TypeError
+                    if entry_time.tzinfo is not None:
+                        entry_time = entry_time.replace(tzinfo=None)
+                    
+                    # 确保 start_time 和 end_time 也是 naive
+                    search_start = start_time.replace(tzinfo=None) if start_time.tzinfo is not None else start_time
+                    search_end = end_time.replace(tzinfo=None) if end_time and end_time.tzinfo is not None else end_time
+                    
+                    if entry_time >= search_start:
+                        if search_end is None or entry_time <= search_end:
                             results.append(entry)
-                        elif entry_time > end_time:
-                            pass
+                        elif entry_time > search_end:
+                            # 假设日志是按时间顺序排列的，如果超过了 end_time，可以提前退出
+                            break
                 except (json.JSONDecodeError, KeyError, ValueError):
                     continue
     except Exception as e:
@@ -45,7 +56,7 @@ def fetch_logs_from_file(start_time: datetime, end_time: Optional[datetime] = No
         
     return results
 
-# --- MCP Server (stdio) ---
+# --- MCP Server 定义 ---
 
 mcp_app = Server("log-fetcher")
 
@@ -83,21 +94,9 @@ async def call_tool(name: str, arguments: Any) -> List[types.TextContent]:
     
     raise ValueError(f"Tool not found: {name}")
 
-async def run_mcp_stdio():
-    log_error("Running MCP stdio server...")
-    try:
-        async with stdio_server() as (read_stream, write_stream):
-            await mcp_app.run(
-                read_stream,
-                write_stream,
-                mcp_app.create_initialization_options()
-            )
-    except Exception as e:
-        log_error(f"MCP stdio server error: {e}")
+# --- HTTP Mode (REST API) ---
 
-# --- HTTP Server (FastAPI) ---
-
-http_app = FastAPI(title="Log Fetcher Local API")
+http_app = FastAPI(title="Log Fetcher REST API")
 
 @http_app.get("/logs")
 async def get_logs(
@@ -111,34 +110,68 @@ async def get_logs(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid date format: {e}")
 
-# --- 主程序入口 ---
+# --- SSE Mode (MCP SSE) ---
 
-async def main():
-    if os.getenv("MCP_HTTP_ENABLED", "true").lower() == "true":
-        log_error("Starting HTTP server on 127.0.0.1:8088 in background...")
-        config = uvicorn.Config(http_app, host="127.0.0.1", port=8088, log_level="info")
-        server = uvicorn.Server(config)
+sse_app = FastAPI(title="Log Fetcher MCP SSE")
+sse_transport = SseServerTransport("/messages")
+
+@sse_app.get("/sse")
+async def sse_endpoint(request: Request):
+    async with sse_transport.connect_sse(request.scope, request.receive, request._send) as sse:
+        await mcp_app.run(
+            sse.read_stream,
+            sse.write_stream,
+            mcp_app.create_initialization_options()
+        )
+
+@sse_app.post("/messages")
+async def messages_endpoint(request: Request):
+    await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+
+# --- 启动逻辑 ---
+
+async def start_mcp_servers():
+    http_enabled = os.getenv("MCP_HTTP_ENABLED", "true").lower() == "true"
+    sse_enabled = os.getenv("MCP_SSE_ENABLED", "false").lower() == "true"
+    
+    try:
+        http_port = int(os.getenv("MCP_HTTP_PORT", "8088"))
+    except ValueError:
+        log_error(f"Warning: Invalid MCP_HTTP_PORT. Defaulting to 8088.")
+        http_port = 8088
         
-        # 启动 HTTP 服务器任务
-        http_task = asyncio.create_task(server.serve())
+    try:
+        sse_port = int(os.getenv("MCP_SSE_PORT", "8089"))
+    except ValueError:
+        log_error(f"Warning: Invalid MCP_SSE_PORT. Defaulting to 8089.")
+        sse_port = 8089
+    
+    tasks = []
+    
+    if http_enabled:
+        log_error(f"Starting MCP HTTP (REST) server on 0.0.0.0:{http_port}...")
+        http_config = uvicorn.Config(http_app, host="0.0.0.0", port=http_port, log_level="info")
+        http_server = uvicorn.Server(http_config)
+        tasks.append(asyncio.create_task(http_server.serve()))
         
-        # 尝试运行 MCP stdio
-        try:
-            await run_mcp_stdio()
-        except Exception as e:
-            log_error(f"Stdio server error: {e}")
+    if sse_enabled:
+        log_error(f"Starting MCP SSE server on 0.0.0.0:{sse_port}...")
+        sse_config = uvicorn.Config(sse_app, host="0.0.0.0", port=sse_port, log_level="info")
+        sse_server = uvicorn.Server(sse_config)
+        tasks.append(asyncio.create_task(sse_server.serve()))
         
-        # 无论 stdio 发生了什么，只要开启了 HTTP，就继续运行
-        log_error("Stdio finished. Keeping process alive for HTTP...")
-        await http_task
-    else:
-        log_error("HTTP server disabled. Running stdio only.")
-        await run_mcp_stdio()
+    return tasks
 
 if __name__ == "__main__":
-    log_error("MCP Server starting...")
+    # 保留独立运行能力用于调试
+    async def run_standalone():
+        tasks = await start_mcp_servers()
+        if not tasks:
+            log_error("No MCP modes enabled. Exiting.")
+            return
+        await asyncio.gather(*tasks)
+
     try:
-        asyncio.run(main())
+        asyncio.run(run_standalone())
     except KeyboardInterrupt:
         pass
-    log_error("MCP Server shutting down.")

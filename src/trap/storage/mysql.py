@@ -1,6 +1,7 @@
 import mysql.connector
 from mysql.connector import pooling
 from datetime import datetime
+import threading
 from .base import Storage
 
 class MySQLStorage(Storage):
@@ -12,61 +13,61 @@ class MySQLStorage(Storage):
             'database': database
         }
         self.pool = None
+        self._lock = threading.Lock()
 
     def setup(self):
-        try:
-            # Create database first (without database selected)
-            conn = mysql.connector.connect(
-                host=self.config['host'],
-                user=self.config['user'],
-                password=self.config['password']
-            )
-            cursor = conn.cursor()
-            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.config['database']}")
-            conn.commit()
-            cursor.close()
-            conn.close()
-
-            # Now create the connection pool targeting the specific database
-            self.pool = mysql.connector.pooling.MySQLConnectionPool(
-                pool_name="trap_pool",
-                pool_size=5,
-                pool_reset_session=True,
-                **self.config
-            )
-
-            # Table structure designed for extensibility and AI analysis
-            conn = self.pool.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS records (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    timestamp DATETIME,
-                    sender_ip VARCHAR(45),
-                    protocol VARCHAR(50),
-                    content_hex LONGTEXT,
-                    decoded_content LONGTEXT,
-                    metadata JSON,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        with self._lock:
+            if self.pool: # Double-check locking pattern
+                return
+                
+            try:
+                # Create database first (without database selected)
+                conn = mysql.connector.connect(
+                    host=self.config['host'],
+                    user=self.config['user'],
+                    password=self.config['password']
                 )
-            """)
-            conn.commit()
-            cursor.close()
-            conn.close()
-        except Exception as err:
-            print(f"Error during MySQL setup (will retry lazily later): {err}")
-            self.pool = None
+                cursor = conn.cursor()
+                cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.config['database']}")
+                conn.commit()
+                cursor.close()
+                conn.close()
+
+                # Now create the connection pool targeting the specific database
+                self.pool = mysql.connector.pooling.MySQLConnectionPool(
+                    pool_name="trap_pool",
+                    pool_size=5,
+                    pool_reset_session=True,
+                    **self.config
+                )
+
+                # Table structure designed for extensibility and AI analysis
+                conn = self.pool.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS records (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        timestamp DATETIME,
+                        sender_ip VARCHAR(45),
+                        protocol VARCHAR(50),
+                        content_hex LONGTEXT,
+                        decoded_content LONGTEXT,
+                        metadata JSON,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as err:
+                print(f"Error during MySQL setup (will retry lazily later): {err}")
+                self.pool = None
 
     def record(self, timestamp: datetime, sender_ip: str, content: bytes, decoded_content: str, protocol: str):
         if not self.pool:
-            print("Warning: Connection pool not initialized. Attempting to initialize.")
-            try:
-                self.setup()
-            except Exception as e:
-                print(f"Error during lazy MySQL setup: {e}")
+            self.setup()
+            if not self.pool: # If setup still failed
                 return
-            
-        conn = None
         try:
             conn = self.pool.get_connection()
             cursor = conn.cursor()

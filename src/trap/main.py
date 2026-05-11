@@ -8,6 +8,7 @@ from .storage.file import FileStorage
 from .storage.mysql import MySQLStorage
 from .handlers.default import DefaultHandler, HTTPHandler
 from .handlers.tls import TLSHandler
+from .mcp_server import start_mcp_servers
 
 class Honeypot:
     def __init__(self):
@@ -217,10 +218,16 @@ async def main():
             print(f"Warning: Invalid port '{port.strip()}'. Skipping.")
     
     if not tasks:
-        print("Error: No valid ports configured. Exiting.")
+        print("Warning: No valid honey ports configured.")
+
+    # Start MCP servers
+    mcp_tasks = await start_mcp_servers()
+    
+    if not tasks and not mcp_tasks:
+        print("Error: No services (Honeypot or MCP) are enabled. Exiting.")
         return
 
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, *mcp_tasks)
 
 if __name__ == "__main__":
     asyncio.run(main())

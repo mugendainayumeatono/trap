@@ -22,6 +22,29 @@ Use environment variables in `docker-compose.yml`:
 - `TLS_CERT_PATH`: Path to the DER-encoded certificate (default: `/app/certs/cert.der`).
 - `TLS_KEY_PATH`: Path to the PEM-encoded private key (default: `/app/certs/cert.key`).
 - `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`: MySQL connection details.
+- `MCP_HTTP_ENABLED`: Enable REST API for logs (default: `true`).
+- `MCP_SSE_ENABLED`: Enable MCP SSE server (default: `false`).
+- `MCP_HTTP_PORT`: Port for REST API (default: `8088`).
+- `MCP_SSE_PORT`: Port for MCP SSE (default: `8089`).
+
+## MCP (Model Context Protocol) Support
+Trap includes a built-in MCP service that allows AI agents to fetch and analyze honeypot logs. It runs alongside the main honeypot process and supports two modes:
+
+### 1. HTTP REST API
+A simple JSON API to query logs by time range.
+- **Endpoint**: `GET http://<host>:8088/logs`
+- **Parameters**: 
+    - `start_time` (Required): ISO 8601 format.
+    - `end_time` (Optional): ISO 8601 format.
+- **Example**: `curl "http://localhost:8088/logs?start_time=2026-05-10T00:00:00"`
+
+### 2. MCP SSE Server
+A standard MCP Server implementation using Server-Sent Events.
+- **Endpoint**: `http://<host>:8089/sse`
+- **Tool**: `fetch_logs(start_time, end_time)`
+- **Note**: This mode is ideal for connecting Trap directly to MCP-compatible IDEs or agents.
+
+*Note: Both modes return a maximum of 1000 entries per request to ensure performance.*
 
 ## Usage
 

@@ -4,16 +4,18 @@ Trap 是一个基于 Python 开发的高性能、可扩展的蜜罐系统，旨�
 
 ## 1. 系统架构
 
-系统主要由三个核心组件组成：
+系统主要由四个核心组件组成：
 
 - **Honeypot (核心服务)**: 负责管理有状态的连接、调度协议处理器和存储模块。
 - **Protocol Handlers (协议处理器)**: 负责识别流量协议，并维护握手状态以生成高度逼真的模拟响应。
 - **Storage (存储模块)**: 负责将捕获的数据持久化到本地文件或 MySQL 数据库。
+- **MCP Service (分析插件)**: 内置的日志分析接口，支持 HTTP REST 和 MCP SSE 协议，方便 AI 接入。
 
 ## 2. 功能特性
 
 - **多端口监听**: 支持同时在多个端口上启动服务。
 - **高级 TLS 模拟**: 实现了有状态的 TLS 1.2 握手协议。能动态解析扫描器的指纹，自适应协商所有的加密套件 (Cipher Suites)、椭圆曲线和签名算法。通过提供伪造的加密 `Finished` 数据包，成功骗取高级扫描器的完整探测载荷。
+- **MCP (Model Context Protocol)**: 内置支持 MCP 协议，AI 代理可以通过 SSE 传输层或 REST API 实时调取并分析攻击日志。
 - **协议自动识别**: 内置协议识别机制（目前支持 TLS, HTTP 和通用识别）。
 - **灵活的存储方案**: 
     - **文件存储**: 支持自动按大小滚动日志（Rotate），线程安全。
@@ -34,17 +36,27 @@ Trap 是一个基于 Python 开发的高性能、可扩展的蜜罐系统，旨�
 | `TLS_CERT_PATH` | TLS 证书路径 (DER 格式) | `/app/certs/cert.der` |
 | `TLS_KEY_PATH` | TLS 私钥路径 (PEM 格式) | `/app/certs/cert.key` |
 | `SESSION_TIMEOUT` | 单个连接的最长存活时间（秒） | `30` |
+| `MCP_HTTP_ENABLED` | 是否开启 HTTP 日志接口 | `true` |
+| `MCP_SSE_ENABLED` | 是否开启 MCP SSE 服务 | `false` |
+| `MCP_HTTP_PORT` | HTTP 接口端口 | `8088` |
+| `MCP_SSE_PORT` | MCP SSE 服务端口 | `8089` |
 
 ## 4. 模块详细设计
 
 ### 4.1 核心逻辑 (`main.py`)
-使用 `asyncio` 实现异步并发处理。引入了 `session_id` 和 `cleanup` 钩子，支持协议处理器进行多步交互。
+使用 `asyncio` 实现异步并发处理。引入了 `session_id` 和 `cleanup` 钩子，支持协议处理器进行多步交互。同时集成了 MCP 服务，使其随主进程一同启动。
 
 ### 4.2 协议处理 (`src/trap/handlers/`)
 - **ProtocolHandler (基类)**: 定义了包含 `identify`, `handle` 和 `cleanup` 的接口。
 - **TLSHandler**: 核心伪装模块。使用 `cryptography` 解析 RSA 预主密钥并派生主密钥，伪造 `Change Cipher Spec` 和 `Finished` 欺骗客户端。
 - **HTTPHandler**: 识别 HTTP 请求，并返回模拟的 nginx 欢迎页面。
 - **DefaultHandler**: 后备处理器。
+
+### 4.3 MCP 服务 (`src/trap/mcp_server.py`)
+提供多模式日志访问：
+- **REST 模式**: 通过 `/logs` 接口提供 ISO 时间范围查询，返回格式化的 JSON。
+- **SSE 模式**: 符合 MCP 标准的服务器端发送事件实现，提供 `fetch_logs` 工具。
+- **安全性**: 具备结果上限保护（1000条/次）和时区归一化逻辑，防止内存溢出和日期比较异常。
 
 ## 5. 开发与运行
 

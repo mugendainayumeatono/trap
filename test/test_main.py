@@ -122,14 +122,17 @@ async def test_honeypot_listen():
 @pytest.mark.asyncio
 async def test_main_function(monkeypatch):
     monkeypatch.setenv("LISTEN_PORTS", "80,443")
-    with patch("trap.main.Honeypot") as mock_hp_class:
+    with patch("trap.main.Honeypot") as mock_hp_class, \
+         patch("trap.main.start_mcp_servers", new_callable=AsyncMock) as mock_mcp:
         mock_hp = mock_hp_class.return_value
         mock_hp.listen = AsyncMock()
+        mock_mcp.return_value = []
         
         from trap.main import main as main_func
         await main_func()
         
         assert mock_hp.listen.call_count == 2
+        assert mock_mcp.called
         ports = [call[0][1] for call in mock_hp.listen.call_args_list]
         assert 80 in ports
         assert 443 in ports
