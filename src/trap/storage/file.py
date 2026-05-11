@@ -3,7 +3,7 @@ import json
 import logging
 import logging.handlers
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from .base import Storage
 
 class CombinedRotatingHandler(logging.handlers.RotatingFileHandler):
@@ -18,7 +18,7 @@ class CombinedRotatingHandler(logging.handlers.RotatingFileHandler):
             self.rolloverAt = None
             return
 
-        # 尝试从文件内容中读取第一行的时间戳，这比 mtime 更可靠（跨重启且不受文件系统 touch 影响）
+        # 尝试从文件内容中读取第一行的时间戳
         creation_time = None
         if os.path.exists(self.baseFilename):
             try:
@@ -26,19 +26,17 @@ class CombinedRotatingHandler(logging.handlers.RotatingFileHandler):
                     first_line = f.readline()
                     if first_line:
                         data = json.loads(first_line)
-                        creation_time = datetime.fromisoformat(data['timestamp']).timestamp()
+                        # 统一使用 UTC 时区解析
+                        dt = datetime.fromisoformat(data['timestamp'].replace('Z', '+00:00'))
+                        creation_time = dt.timestamp()
             except Exception:
                 pass
             
-            # 如果读取失败，尝试使用 ctime (在 Linux 上是元数据改变时间，在 Windows 上是创建时间)
-            # 虽然 ctime 在 Linux 上也会随修改而更新，但它依然比 mtime 相对更早一点（在某些边缘情况下）
-            # 最理想的情况是上面的 "读取首行时间戳" 逻辑。
+            # 如果读取失败，尝试使用 ctime (作为回退)
             if creation_time is None:
                 try:
-                    # 某些系统支持 birthtime
                     creation_time = os.stat(self.baseFilename).st_birthtime
                 except AttributeError:
-                    # 回退到 ctime (Linux 下通常等同于最后一次修改元数据的时间)
                     creation_time = os.path.getctime(self.baseFilename)
         else:
             creation_time = time.time()
@@ -66,7 +64,8 @@ class CombinedRotatingHandler(logging.handlers.RotatingFileHandler):
             self.stream = None
         
         if os.path.exists(self.baseFilename):
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S_%f")
+            # 使用 UTC 时间戳命名文件
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S_%f")
             dfn = f"{self.baseFilename}.{timestamp}"
             os.rename(self.baseFilename, dfn)
         

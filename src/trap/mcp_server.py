@@ -37,18 +37,18 @@ def fetch_logs_from_file(
     # 按修改时间从新到旧排序
     all_files.sort(key=os.path.getmtime, reverse=True)
 
-    # 统一归一化为 naive UTC 时间，用于安全比较
-    def normalize_to_utc_naive(dt: Optional[datetime]):
+    # 统一归一化为带 UTC 时区的时间对象，用于安全比较
+    def normalize_to_utc_aware(dt: Optional[datetime]):
         if dt is None:
             return None
         if dt.tzinfo is None:
-            # 如果没有时区信息，假设已经是 UTC（蜜罐默认行为）
-            return dt
-        # 如果有时区信息，先转为 UTC 再去掉时区标签
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+            # 如果没有时区信息，强制指定为 UTC
+            return dt.replace(tzinfo=timezone.utc)
+        # 如果有时区信息，转为 UTC
+        return dt.astimezone(timezone.utc)
 
-    utc_start = normalize_to_utc_naive(start_time)
-    utc_end = normalize_to_utc_naive(end_time)
+    utc_start = normalize_to_utc_aware(start_time)
+    utc_end = normalize_to_utc_aware(end_time)
 
     skipped = 0
     found_count = 0
@@ -63,7 +63,7 @@ def fetch_logs_from_file(
                         # 兼容处理带 Z 的 ISO 格式 (Python < 3.11)
                         ts_str = entry['timestamp'].replace('Z', '+00:00')
                         entry_time_raw = datetime.fromisoformat(ts_str)
-                        entry_time = normalize_to_utc_naive(entry_time_raw)
+                        entry_time = normalize_to_utc_aware(entry_time_raw)
                         
                         if entry_time >= utc_start and (utc_end is None or entry_time <= utc_end):
                             found_count += 1

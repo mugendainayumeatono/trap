@@ -28,13 +28,13 @@ def test_fetch_logs_from_multiple_files(tmp_path):
     try:
         # 搜索过去 3 天的日志
         start_time = now - timedelta(days=3)
-        results = fetch_logs_from_file(start_time)
+        result_data = fetch_logs_from_file(start_time)
         
         # 验证是否找到了两个文件中的日志
-        ips = [r["sender_ip"] for r in results]
+        ips = [r["sender_ip"] for r in result_data["logs"]]
         assert "current" in ips
         assert "rotated" in ips
-        assert len(results) == 2
+        assert result_data["total"] == 2
     finally:
         trap.mcp_server.LOG_FILE = old_log_file
 
