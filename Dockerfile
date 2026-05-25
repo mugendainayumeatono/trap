@@ -10,7 +10,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 # Install dependencies
-RUN uv sync --frozen --no-cache && chown -R 1000:1000 /app
+RUN uv sync --frozen --no-cache && rm -f .venv/.lock && chown -R 1000:1000 /app
 
 # Copy source code
 COPY src/ ./src/

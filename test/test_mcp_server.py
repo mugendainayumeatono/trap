@@ -72,13 +72,32 @@ def test_http_logs_endpoint(tmp_path):
 # --- 接口测试：SSE (基础连通性) ---
 
 def test_sse_endpoints():
-    # 模拟 sse_transport 以避免复杂的长连接交互
-    # 我们主要测试 POST /messages 接口，因为 GET /sse 是长连接，在同步测试环境下容易卡死
-    with patch("trap.mcp_server.sse_transport.handle_post_message", new_callable=AsyncMock) as mock_handle:
+    # 模拟 session_manager.handle_request 以避免复杂的长连接交互
+    # 我们测试 POST /sse 接口是否正确将请求转发给 handle_request 处理器
+    async def mock_handle(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"mocked", "more_body": False})
+
+    with patch("trap.mcp_server.session_manager.handle_request", side_effect=mock_handle) as mock_stub:
         sse_client = TestClient(sse_app)
-        response = sse_client.post("/messages", json={"jsonrpc": "2.0", "method": "ping", "id": 1})
+        response = sse_client.post("/sse", json={"jsonrpc": "2.0", "method": "initialize", "id": 1})
         assert response.status_code == 200
-        assert mock_handle.called
+        assert mock_stub.called
+
+def test_sse_legacy_endpoints(monkeypatch):
+    # 测试传统 SSE 模式
+    monkeypatch.setenv("MCP_TRANSPORT_MODE", "sse")
+    
+    async def mock_handle_post(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"legacy_mocked", "more_body": False})
+
+    with patch("trap.mcp_server.sse_transport.handle_post_message", side_effect=mock_handle_post) as mock_stub:
+        sse_client = TestClient(sse_app)
+        response = sse_client.post("/messages", json={"jsonrpc": "2.0", "method": "initialize", "id": 1})
+        assert response.status_code == 200
+        assert response.content == b"legacy_mocked"
+        assert mock_stub.called
 
 # --- 启动逻辑测试 ---
 

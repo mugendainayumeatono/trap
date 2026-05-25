@@ -8,8 +8,11 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Request
 from mcp.server import Server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.sse import SseServerTransport
 import mcp.types as types
+import contextlib
+from starlette.routing import Route
 
 # --- 核心逻辑：日志搜索 ---
 
@@ -155,21 +158,83 @@ async def get_logs(
 
 # --- SSE Mode (MCP SSE) ---
 
-sse_app = FastAPI(title="Log Fetcher MCP SSE")
+def get_transport_mode() -> str:
+    # 支持 MCP_TRANSPORT_MODE 且向下兼容 MCP_SSE_TRANSPORT，默认值为 streamable
+    mode = os.getenv("MCP_TRANSPORT_MODE", os.getenv("MCP_SSE_TRANSPORT", "streamable"))
+    return mode.lower()
+
+session_manager = StreamableHTTPSessionManager(mcp_app)
 sse_transport = SseServerTransport("/messages")
 
-@sse_app.get("/sse")
-async def sse_endpoint(request: Request):
-    async with sse_transport.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
-        await mcp_app.run(
-            read_stream,
-            write_stream,
-            mcp_app.create_initialization_options()
-        )
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    if get_transport_mode() == "streamable":
+        async with session_manager.run():
+            yield
+    else:
+        yield
 
-@sse_app.post("/messages")
-async def messages_endpoint(request: Request):
-    await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+class SseTransportASGIApp:
+    async def __call__(self, scope, receive, send) -> None:
+        mode = get_transport_mode()
+        if mode == "streamable":
+            await session_manager.handle_request(scope, receive, send)
+        else:
+            if scope["method"] != "GET":
+                await send({
+                    "type": "http.response.start",
+                    "status": 405,
+                    "headers": [(b"content-type", b"text/plain")]
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": b"Method Not Allowed",
+                    "more_body": False
+                })
+                return
+            async with sse_transport.connect_sse(scope, receive, send) as sse:
+                await mcp_app.run(
+                    sse.read_stream,
+                    sse.write_stream,
+                    mcp_app.create_initialization_options()
+                )
+
+class MessagesASGIApp:
+    async def __call__(self, scope, receive, send) -> None:
+        mode = get_transport_mode()
+        if mode in ("sse", "legacy"):
+            if scope["method"] != "POST":
+                await send({
+                    "type": "http.response.start",
+                    "status": 405,
+                    "headers": [(b"content-type", b"text/plain")]
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": b"Method Not Allowed",
+                    "more_body": False
+                })
+                return
+            await sse_transport.handle_post_message(scope, receive, send)
+        else:
+            await send({
+                "type": "http.response.start",
+                "status": 404,
+                "headers": [(b"content-type", b"text/plain")]
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b"Not Found",
+                "more_body": False
+            })
+
+sse_app = FastAPI(title="Log Fetcher MCP SSE", lifespan=lifespan)
+sse_app.routes.append(
+    Route("/sse", SseTransportASGIApp(), methods=["GET", "POST", "DELETE"])
+)
+sse_app.routes.append(
+    Route("/messages", MessagesASGIApp(), methods=["POST"])
+)
 
 # --- 启动逻辑 ---
 

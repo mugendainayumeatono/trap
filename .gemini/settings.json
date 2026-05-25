@@ -1,7 +1,1 @@
-{
-  "mcpServers": {
-    "trap-logs": {
-      "url": "http://localhost:8089/sse"
-    }
-  }
-}
+{}
