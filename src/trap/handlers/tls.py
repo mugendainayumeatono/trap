@@ -1,24 +1,69 @@
 import os
 import binascii
+import hashlib
+import hmac
+import struct
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding, ec, x25519
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .base import ProtocolHandler
+
+def p_hash(secret: bytes, seed: bytes, output_len: int, hash_func=hashlib.sha256) -> bytes:
+    result = bytearray()
+    a = seed
+    while len(result) < output_len:
+        a = hmac.new(secret, a, hash_func).digest()
+        result.extend(hmac.new(secret, a + seed, hash_func).digest())
+    return bytes(result[:output_len])
+
+def tls_12_prf(secret: bytes, label: bytes, seed: bytes, output_len: int) -> bytes:
+    return p_hash(secret, label + seed, output_len, hashlib.sha256)
 
 class TLSSession:
     def __init__(self):
         self.ccs_received = False
+        self.client_random = b""
+        self.server_random = b""
+        self.cipher_suite = b""
+        self.client_version = b"\x03\x03"
+        self.handshake_messages = bytearray()
+        self.ecdh_private_key = None
+        self.master_secret = None
+        self.server_write_key = None
+        self.server_write_iv = None
 
 class TLSHandler(ProtocolHandler):
     def __init__(self):
         self.sessions = {}
         self.cert_der = self._load_cert()
+        self.private_key = self._load_key()
 
     def _load_cert(self):
         cert_path = os.getenv("TLS_CERT_PATH", "/app/certs/cert.der")
+        if not os.path.exists(cert_path):
+            local_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "certs", "cert.der")
+            if os.path.exists(local_path):
+                cert_path = local_path
         try:
             if os.path.exists(cert_path):
                 with open(cert_path, "rb") as f: return f.read()
         except Exception as e:
             print(f"Error loading TLS certificate from {cert_path}: {e}")
         return b""
+
+    def _load_key(self):
+        key_path = os.getenv("TLS_KEY_PATH", "/app/certs/cert.key")
+        if not os.path.exists(key_path):
+            local_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "certs", "cert.key")
+            if os.path.exists(local_path):
+                key_path = local_path
+        try:
+            if os.path.exists(key_path):
+                with open(key_path, "rb") as f:
+                    return serialization.load_pem_private_key(f.read(), password=None)
+        except Exception as e:
+            print(f"Error loading TLS private key from {key_path}: {e}")
+        return None
 
     def identify(self, data: bytes) -> bool:
         return len(data) >= 6 and data[0] == 0x16 and data[1] == 0x03
@@ -61,11 +106,33 @@ class TLSHandler(ProtocolHandler):
                         # This is the encrypted Finished message from the client
                         all_decoded.append("Client Finished (Encrypted)")
                         
-                        # Simulate the server's encryption confirmation
+                        # Simulate the server's encryption confirmation (CCS)
                         ccs_record = self._build_record(0x14, version, b"\x01")
                         
-                        dummy_encrypted_finished = os.urandom(40)
-                        finished_record = self._build_record(0x16, version, dummy_encrypted_finished)
+                        # Calculate PRF verify_data based on accumulated handshake messages
+                        handshake_hash = hashlib.sha256(session.handshake_messages).digest()
+                        if session.master_secret:
+                            verify_data = tls_12_prf(session.master_secret, b"server finished", handshake_hash, 12)
+                        else:
+                            verify_data = os.urandom(12)
+                            
+                        finished_handshake = bytes([20, 0, 0, 12]) + verify_data
+                        
+                        # If session keys are available, encrypt Finished with AES-GCM; otherwise fallback gracefully
+                        if session.server_write_key and session.server_write_iv:
+                            try:
+                                explicit_nonce = os.urandom(8)
+                                nonce = session.server_write_iv + explicit_nonce
+                                seq_num = 0
+                                aad = struct.pack(">Q", seq_num) + bytes([0x16]) + version + struct.pack(">H", len(finished_handshake))
+                                ciphertext = AESGCM(session.server_write_key).encrypt(nonce, finished_handshake, aad)
+                                finished_record = self._build_record(0x16, version, explicit_nonce + ciphertext)
+                            except Exception:
+                                dummy_encrypted_finished = os.urandom(40)
+                                finished_record = self._build_record(0x16, version, dummy_encrypted_finished)
+                        else:
+                            dummy_encrypted_finished = os.urandom(40)
+                            finished_record = self._build_record(0x16, version, dummy_encrypted_finished)
                         
                         all_responses += ccs_record + finished_record
                         all_decoded.append("Server Finished (Simulated)")
@@ -116,6 +183,12 @@ class TLSHandler(ProtocolHandler):
                 return "tls", "Malformed Client Hello (too short)", b""
                 
             client_version = h_payload[0:2]
+            client_random = h_payload[2:34]
+            session.client_random = client_random
+            session.client_version = client_version
+            
+            # Record Client Hello handshake in session message history
+            session.handshake_messages.extend(payload[:4+h_len])
             
             # Session ID length is at offset 34 (2 bytes version + 32 bytes random)
             sid_len = h_payload[34]
@@ -181,19 +254,22 @@ class TLSHandler(ProtocolHandler):
                                 sig_algs = [ext_data[i:i+2] for i in range(2, 2+s_len, 2)]
                     offset += ext_data_len
             
-            # To "support all", we pick the client's very first preferred suite
+            # Pick client's preferred suite
             cipher_suite = client_suites[0] if client_suites else b"\x00\x9c"
+            session.cipher_suite = cipher_suite
             selected_group = supported_groups[0] if supported_groups else b"\x00\x17"
             selected_sig = sig_algs[0] if sig_algs else b"\x04\x01"
             
             # Server Hello
             server_random = os.urandom(32)
+            session.server_random = server_random
             
             # Ensure safe indexing for sid extraction
             sid_data = h_payload[35:35+sid_len] if sid_len > 0 else b""
             
             sh_payload = client_version + server_random + bytes([sid_len]) + sid_data + cipher_suite + b"\x00"
             sh_handshake = self._build_handshake(2, sh_payload)
+            session.handshake_messages.extend(sh_handshake)
             
             # Certificate
             if not self.cert_der:
@@ -201,25 +277,99 @@ class TLSHandler(ProtocolHandler):
             cert_list = len(self.cert_der).to_bytes(3, "big") + self.cert_der
             cert_payload = len(cert_list).to_bytes(3, "big") + cert_list
             cert_handshake = self._build_handshake(11, cert_payload)
+            session.handshake_messages.extend(cert_handshake)
             
-            # Server Key Exchange (if ECDHE suite)
+            # Server Key Exchange (if ECDHE suite: 0xc0xx or 0xccxx)
             extra_handshakes = b""
-            if cipher_suite[0] == 0xc0:
-                dummy_pubkey = b"\x04" + os.urandom(64)
-                ske_payload = b"\x03" + selected_group + bytes([len(dummy_pubkey)]) + dummy_pubkey
-                if client_version >= b"\x03\x03":
-                    ske_payload += selected_sig
-                ske_payload += b"\x00\x40" + (b"\x00" * 64)
+            is_ecdhe = (cipher_suite[0] == 0xc0 and len(cipher_suite) == 2 and cipher_suite[1] not in (0x12, 0x0a)) or \
+                       (cipher_suite[0] == 0xcc and len(cipher_suite) == 2 and cipher_suite[1] in (0xa8, 0xa9))
+            
+            if is_ecdhe:
+                # Generate ephemeral key according to selected curve
+                if selected_group == b"\x00\x1d": # x25519
+                    session.ecdh_private_key = x25519.X25519PrivateKey.generate()
+                    pub_bytes = session.ecdh_private_key.public_key().public_bytes(
+                        encoding=serialization.Encoding.Raw,
+                        format=serialization.PublicFormat.Raw
+                    )
+                else: # Default secp256r1 (0x0017)
+                    session.ecdh_private_key = ec.generate_private_key(ec.SECP256R1())
+                    pub_bytes = session.ecdh_private_key.public_key().public_bytes(
+                        encoding=serialization.Encoding.X962,
+                        format=serialization.PublicFormat.UncompressedPoint
+                    )
+                
+                # ServerECDHParams: curve_type (3 = named_curve) + named_curve (2 bytes) + point_len + point
+                ske_params = b"\x03" + selected_group + bytes([len(pub_bytes)]) + pub_bytes
+                
+                # Sign params with server's RSA private key if available
+                if self.private_key:
+                    try:
+                        to_sign = session.client_random + session.server_random + ske_params
+                        sig = self.private_key.sign(to_sign, padding.PKCS1v15(), hashes.SHA256())
+                        ske_payload = ske_params + selected_sig + len(sig).to_bytes(2, "big") + sig
+                    except Exception:
+                        ske_payload = ske_params + selected_sig + b"\x00\x40" + (b"\x00" * 64)
+                else:
+                    ske_payload = ske_params
+                    if client_version >= b"\x03\x03":
+                        ske_payload += selected_sig
+                    ske_payload += b"\x00\x40" + (b"\x00" * 64)
+                    
                 extra_handshakes = self._build_handshake(12, ske_payload)
+                session.handshake_messages.extend(extra_handshakes)
                 
             # Server Hello Done
             shd_handshake = self._build_handshake(14, b"")
+            session.handshake_messages.extend(shd_handshake)
             
             response = self._build_record(0x16, version, sh_handshake + cert_handshake + extra_handshakes + shd_handshake)
             
             return "tls", f"Client Hello {client_version.hex()} | Suite: {cipher_suite.hex()}", response
 
         elif h_type == 16: # Client Key Exchange
+            session.handshake_messages.extend(payload[:4+h_len])
+            
+            pms = None
+            if session.ecdh_private_key:
+                try:
+                    # Client public key is preceded by 1-byte length in ECDH CKE
+                    client_pub = h_payload[1:] if len(h_payload) > 1 and h_payload[0] == len(h_payload) - 1 else h_payload
+                    if isinstance(session.ecdh_private_key, x25519.X25519PrivateKey):
+                        peer_key = x25519.X25519PublicKey.from_public_bytes(client_pub)
+                        pms = session.ecdh_private_key.exchange(peer_key)
+                    elif isinstance(session.ecdh_private_key, ec.EllipticCurvePrivateKey):
+                        peer_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), client_pub)
+                        pms = session.ecdh_private_key.exchange(ec.ECDH(), peer_key)
+                except Exception:
+                    pass
+            elif self.private_key:
+                try:
+                    # RSA EncryptedPreMasterSecret has 2-byte length prefix
+                    enc_pms = h_payload[2:] if len(h_payload) > 2 and int.from_bytes(h_payload[:2], "big") == len(h_payload) - 2 else h_payload
+                    pms = self.private_key.decrypt(enc_pms, padding.PKCS1v15())
+                except Exception:
+                    pass
+
+            if not pms:
+                # Fallback to deterministic pseudo-secret for simulated/dummy probes
+                pms = hashlib.sha256(session.client_random + session.server_random).digest()[:48]
+
+            session.master_secret = tls_12_prf(
+                pms,
+                b"master secret",
+                session.client_random + session.server_random,
+                48
+            )
+            key_block = tls_12_prf(
+                session.master_secret,
+                b"key expansion",
+                session.server_random + session.client_random,
+                40
+            )
+            session.server_write_key = key_block[16:32]
+            session.server_write_iv = key_block[36:40]
+            
             return "tls", "Client Key Exchange", b""
 
         return "tls", f"Handshake Type {h_type}", b""

@@ -115,3 +115,48 @@ def test_tls_cleanup():
     
     # Session should be removed
     assert session_id not in handler.sessions
+
+def test_tls_prf_finished():
+    handler = TLSHandler()
+    session_id = "test_prf_session"
+    
+    # Client Hello with ECDHE suite
+    client_hello = bytes.fromhex(
+        "1603010034010000300303"
+        "5c66a2cb87d86ef8c3934e2f8ed2740da4723887ab2ce112bd8bcef05e1141fd"
+        "00"
+        "0002c02f" # TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        "0100"
+        "0005000a000400170018" # supported_groups: secp256r1
+    )
+    proto, decoded, response = handler.handle(client_hello, session_id)
+    assert proto == "tls"
+    assert session_id in handler.sessions
+    session = handler.sessions[session_id]
+    assert session.ecdh_private_key is not None
+    assert len(session.handshake_messages) > 0
+
+    # Simulate Client Key Exchange with uncompressed EC point
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    client_ec = ec.generate_private_key(ec.SECP256R1())
+    client_pub = client_ec.public_key().public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint
+    )
+    cke_payload = bytes([len(client_pub)]) + client_pub
+    cke_record = bytes([0x16, 0x03, 0x03]) + len(bytes([16, 0, 0, len(cke_payload)]) + cke_payload).to_bytes(2, "big") + bytes([16, 0, 0, len(cke_payload)]) + cke_payload
+    
+    # Followed by CCS and Finished
+    ccs_record = bytes.fromhex("140303000101")
+    fin_record = bytes.fromhex("160303001000000000000000000000000000000000")
+    
+    proto, decoded, response = handler.handle(cke_record + ccs_record + fin_record, session_id)
+    assert proto == "tls"
+    assert "Client Key Exchange" in decoded
+    assert "Change Cipher Spec" in decoded
+    assert "Server Finished" in decoded
+    # Server should return CCS and encrypted Finished record
+    assert len(response) > 0
+    assert response[0] == 0x14 # Server CCS
+
