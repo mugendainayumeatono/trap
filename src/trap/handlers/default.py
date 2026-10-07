@@ -13,9 +13,11 @@ class DefaultHandler(ProtocolHandler):
         return "unknown", decoded, b"OK\n"
 
 class HTTPHandler(ProtocolHandler):
+    METHODS = (b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ", b"OPTIONS ", b"CONNECT ", b"TRACE ", b"PATCH ")
+
     def identify(self, data: bytes) -> bool:
-        # Simple HTTP check
-        return any(verb in data for verb in [b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ", b"OPTIONS "])
+        # Simple HTTP check: request line must start with a valid HTTP method
+        return data.lstrip(b"\r\n").startswith(self.METHODS)
 
     def handle(self, data: bytes, session_id: str = "") -> tuple[str, str, bytes]:
         try:
