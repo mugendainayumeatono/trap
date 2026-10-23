@@ -147,6 +147,8 @@ class Honeypot:
                                     real_ip = str(ipaddress.ip_address(ips[0]))
                         except (ValueError, IndexError):
                             pass
+                    if real_ip != normalized_ip:
+                        session_id = f"{real_ip}:{peer[1]}" if peer and not isinstance(peer, str) else real_ip
                 is_first_read = False
 
                 timestamp = datetime.now(timezone.utc)

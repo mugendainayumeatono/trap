@@ -111,6 +111,13 @@ class FileStorage(Storage):
             "decoded_content": decoded_content,
             "protocol": protocol
         }
+        if isinstance(decoded_content, str) and decoded_content.startswith("[PHP2SHELL_AUDIT] "):
+            try:
+                first_line = decoded_content.split("\n", 1)[0]
+                raw_meta = first_line[len("[PHP2SHELL_AUDIT] "):].strip()
+                entry["metadata"] = json.loads(raw_meta)
+            except Exception:
+                pass
         self.logger.info(json.dumps(entry))
         for handler in self.logger.handlers:
             handler.flush()

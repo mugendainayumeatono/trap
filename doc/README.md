@@ -15,6 +15,7 @@ Trap 是一个基于 Python 开发的高性能、可扩展的蜜罐系统，旨�
 
 - **多端口监听**: 支持同时在多个端口上启动服务。
 - **高级 TLS 模拟**: 实现了有状态的 TLS 1.2 握手协议。能动态解析扫描器的指纹，自适应协商所有的加密套件 (Cipher Suites)、椭圆曲线和签名算法。通过提供伪造的加密 `Finished` 数据包，成功骗取高级扫描器的完整探测载荷。
+- **PHP2Shell (CVE-2026-109618 & CVE-2026-109619) 高交互漏洞模拟**: 完整模拟 PHP 底层 `session.upload_progress` (`rfc1867`) 与 `zend_bailout` OOM 内存损坏及跨请求残留全局状态 UAF 任意代码执行漏洞。支持多 TCP 分片 `multipart/form-data` 重组、四阶段状态机跟踪（探测 $\rightarrow$ OOM 触发 $\rightarrow$ UAF 代码执行 $\rightarrow$ 虚拟 Webshell 后渗透交互）、Base64 载荷递归解码与安全命令回显沙箱，并通过 `attack_id` 与结构化 `metadata` 记录攻击全过程（详见 [`doc/php2shell_design.md`](./php2shell_design.md)）。
 - **MCP (Model Context Protocol)**: 内置支持 MCP 协议，AI 代理可以通过 SSE 传输层或 REST API 实时调取并分析攻击日志。
 - **协议自动识别**: 内置协议识别机制（目前支持 TLS, HTTP 和通用识别）。
 - **灵活的存储方案**: 

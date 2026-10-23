@@ -6,6 +6,7 @@ A honeypot system that records incoming packets, identifies protocols, and suppo
 - Records timestamp, sender IP, hex content, and decoded content.
 - Framework-based stateful protocol handlers for easy extension.
 - **TLS 1.2 Support**: Fully simulates a TLS 1.2 handshake. Dynamically negotiates cipher suites, elliptic curves, and signature algorithms to adapt to modern scanners. Includes a simulated `Finished` state to capture full client probes without heavy cryptographic overhead.
+- **PHP2Shell (CVE-2026-109618 & CVE-2026-109619) Simulation**: High-interaction simulation of the PHP core `longjmp` OOM memory corruption and `session.upload_progress` (`rfc1867`) stale global state UAF vulnerabilities. Reassembles multi-chunk `multipart/form-data` payloads, simulates PHP 8.3.34 headers/errors, emulates RCE command outputs & virtual webshells, and correlates multi-stage attacks under a unified `attack_id` in structured `metadata`.
 - Storage support:
   - TXT file with size-based rotation.
   - MySQL database with automatic table creation and lazy initialization.

@@ -1,3 +1,4 @@
+import json
 import mysql.connector
 from mysql.connector import pooling
 from datetime import datetime
@@ -71,11 +72,28 @@ class MySQLStorage(Storage):
         try:
             conn = self.pool.get_connection()
             cursor = conn.cursor()
-            query = """
-                INSERT INTO records (timestamp, sender_ip, protocol, content_hex, decoded_content)
-                VALUES (%s, %s, %s, %s, %s)
-            """
-            cursor.execute(query, (timestamp, sender_ip, protocol, content.hex(), decoded_content))
+            metadata_json = None
+            if isinstance(decoded_content, str) and decoded_content.startswith("[PHP2SHELL_AUDIT] "):
+                try:
+                    first_line = decoded_content.split("\n", 1)[0]
+                    raw_meta = first_line[len("[PHP2SHELL_AUDIT] "):].strip()
+                    json.loads(raw_meta)
+                    metadata_json = raw_meta
+                except Exception:
+                    metadata_json = None
+
+            if metadata_json is not None:
+                query = """
+                    INSERT INTO records (timestamp, sender_ip, protocol, content_hex, decoded_content, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(query, (timestamp, sender_ip, protocol, content.hex(), decoded_content, metadata_json))
+            else:
+                query = """
+                    INSERT INTO records (timestamp, sender_ip, protocol, content_hex, decoded_content)
+                    VALUES (%s, %s, %s, %s, %s)
+                """
+                cursor.execute(query, (timestamp, sender_ip, protocol, content.hex(), decoded_content))
             conn.commit()
             cursor.close()
         except mysql.connector.Error as err:
