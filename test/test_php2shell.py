@@ -564,3 +564,335 @@ async def test_integration_mod_php_single_shot_and_keepalive_webshell(tmp_path, 
     assert entries[0]["metadata"]["attack_id"] == entries[1]["metadata"]["attack_id"]
     assert "/cache.php" in entries[1]["metadata"]["active_virtual_files"]
 
+
+# =====================================================================
+# 3. 进阶实战变形与非标准边界测试 (Edge Cases & Deformed Payloads)
+# =====================================================================
+
+
+def test_phpsessid_with_underscore_and_special_chars_across_proxy_pool():
+    """
+    验证缺陷 1 修复：
+    PHPSESSID 包含下划线 `_` 等特殊字符（如 `attacker_sid_curl_2026`）时不会被截断为 `attacker`，
+    且当攻击者使用代理池在每次请求切换不同源 IP 时，仍能通过完整 PHPSESSID 将整条攻击链关联到同一个 attack_id。
+    """
+    handler = HTTPHandler()
+    sid = "attacker_sid_curl_2026"
+
+    # Step 1 (Proxy IP 1): Stage 1 探测
+    boundary = "----ProxyPoolBoundary1"
+    body1 = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"\r\n\r\n'
+        f"recon_check\r\n"
+        f"--{boundary}--\r\n"
+    ).encode("utf-8")
+    req1 = (
+        f"POST /index.php HTTP/1.1\r\n"
+        f"Host: target.local\r\n"
+        f"Cookie: PHPSESSID={sid}\r\n"
+        f"Content-Type: multipart/form-data; boundary={boundary}\r\n"
+        f"Content-Length: {len(body1)}\r\n\r\n"
+    ).encode("utf-8") + body1
+
+    _, dec1, resp1 = handler.handle(req1, session_id="198.51.100.11:51001")
+    meta1 = _parse_audit_metadata(dec1)
+    assert meta1["phpsessid"] == sid
+    assert f"Set-Cookie: PHPSESSID={sid}; path=/".encode() in resp1
+
+    # Step 2 (Proxy IP 2 - 切换了源 IP): Stage 2 OOM 触发
+    body2 = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"\r\n\r\n'
+        f'|O:8:"stdClass":1:{{s:1:"a";i:1;}}\r\n'
+    ).encode("utf-8")
+    req2 = (
+        f"POST /index.php HTTP/1.1\r\n"
+        f"Host: target.local\r\n"
+        f"Cookie: PHPSESSID={sid}\r\n"
+        f"Content-Type: multipart/form-data; boundary={boundary}\r\n"
+        f"Content-Length: 16384\r\n\r\n"
+    ).encode("utf-8") + body2
+
+    _, dec2, _ = handler.handle(req2, session_id="203.0.113.22:52002")
+    meta2 = _parse_audit_metadata(dec2)
+    assert meta2["phpsessid"] == sid
+    assert meta2["attack_id"] == meta1["attack_id"]
+    assert meta2["stage"] == "STAGE_2_OOM_TRIGGER"
+
+    # Step 3 (Proxy IP 3 - 再次切换源 IP，且通过 Query 参数传递带下划线的 PHPSESSID): Stage 3 RCE
+    req3 = (
+        f"GET /index.php?PHPSESSID={sid}&cmd=id HTTP/1.1\r\n"
+        f"Host: target.local\r\n\r\n"
+    ).encode("utf-8")
+    _, dec3, resp3 = handler.handle(req3, session_id="192.0.2.33:53003")
+    meta3 = _parse_audit_metadata(dec3)
+    assert meta3["phpsessid"] == sid
+    assert meta3["attack_id"] == meta1["attack_id"]
+    assert meta3["step_index"] == 3
+    assert b"uid=33(www-data)" in resp3
+
+
+@pytest.mark.asyncio
+async def test_medium_content_length_truncated_oom_and_disconnect_cleanup_persistence(
+    tmp_path, monkeypatch
+):
+    """
+    验证缺陷 2 修复：
+    1. 攻击者声明中等长度 Content-Length: 16384 (16KB < 64KB)，但只发送约 500 字节且故意不发送闭合 boundary 时，
+       蜜罐不会返回空响应挂起傻等，而是立即判定为半初始化 OOM/bailout 触发并返回 500 响应。
+    2. 当攻击者发送真正未完成的 Header/小分片后直接断开连接时，main.py 的 finally 块会将 cleanup_session
+       重组出的 [PHP2SHELL_AUDIT] 摘要完整持久化写入日志存储。
+    """
+    # Part A: 单包中等长度 Content-Length (16384) + 500B 截断 Multipart 立即放行并返回 500
+    handler = HTTPHandler()
+    boundary = "----MediumCLTruncatedBoundary"
+    truncated_body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"\r\n\r\n'
+        f"half_init_bailout_" + ("A" * 320) + "\r\n"
+    ).encode("utf-8")
+    assert 400 < len(truncated_body) < 1000
+
+    req_medium = (
+        f"POST /upload.php HTTP/1.1\r\n"
+        f"Host: target.local\r\n"
+        f"Cookie: PHPSESSID=medium_cl_sid_01\r\n"
+        f"Content-Type: multipart/form-data; boundary={boundary}\r\n"
+        f"Content-Length: 16384\r\n\r\n"
+    ).encode("utf-8") + truncated_body
+
+    proto, decoded, resp = handler.handle(req_medium, session_id="198.51.100.55:60100")
+    assert proto == "http/php2shell"
+    assert resp != b""
+    assert b"HTTP/1.1 500 Internal Server Error" in resp
+    meta = _parse_audit_metadata(decoded)
+    assert meta["stage"] == "STAGE_2_OOM_TRIGGER"
+    assert meta["worker_corrupted"] is True
+
+    # Part B: 攻击者先发小分片进入缓冲区后直接断开 TCP 连接，验证 finally 块将 cleanup 结果落盘
+    log_file = tmp_path / "honey_cleanup_audit.log"
+    monkeypatch.setenv("STORAGE_TYPE", "file")
+    monkeypatch.setenv("LOG_FILE", str(log_file))
+
+    hp = Honeypot()
+    server = await asyncio.start_server(hp.handle_connection, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    server_task = asyncio.create_task(server.serve_forever())
+
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        # 声明 Content-Length: 800 (< 1024)，只发 180 字节且不闭合 boundary，进入 buffer 后立即断开连接
+        partial_body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"\r\n\r\n'
+            f"abrupt_disconnect_oom\r\n"
+        ).encode("utf-8")
+        partial_req = (
+            f"POST /index.php HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"Cookie: PHPSESSID=disconnect_sid_2026\r\n"
+            f"Content-Type: multipart/form-data; boundary={boundary}\r\n"
+            f"Content-Length: 800\r\n\r\n"
+        ).encode("utf-8") + partial_body
+
+        writer.write(partial_req)
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.sleep(0.15)
+    finally:
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+
+    with open(log_file, "r") as f:
+        entries = [json.loads(line) for line in f if line.strip()]
+
+    # 第 1 条为 [PHP2SHELL_FRAGMENT]，第 2 条为断开连接时 cleanup 写入的 [PHP2SHELL_AUDIT]
+    assert len(entries) == 2
+    assert "[PHP2SHELL_FRAGMENT" in entries[0]["decoded_content"]
+    assert "metadata" in entries[1]
+    assert entries[1]["metadata"]["phpsessid"] == "disconnect_sid_2026"
+    assert entries[1]["metadata"]["stage"] == "STAGE_2_OOM_TRIGGER"
+    assert entries[1]["metadata"]["worker_corrupted"] is True
+
+
+def test_rewrite_pseudo_static_route_without_php_extension_or_phpsessid():
+    """
+    验证缺陷 3 修复：
+    针对 Laravel/WordPress/ThinkPHP 等伪静态路由（如 POST /api/upload、POST /login，无 .php 后缀），
+    当攻击者通过代理池切换了 IP、未携带 PHPSESSID，且通过自定义 Header（如 X-Requested-With）
+    或特定 Cookie 传递混淆/二进制载荷时，蜜罐能精准识别并关联到已污染的 Worker 攻击链。
+    """
+    handler = HTTPHandler()
+
+    # Step 1: 攻击者从代理 IP 1 触发 Stage 2 Worker 内存污染（路由为伪静态 /api/upload）
+    boundary = "----LaravelUploadBoundary"
+    stage2_body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"\r\n\r\n'
+        f'|O:8:"stdClass":1:{{s:4:"heap";i:1;}}\r\n'
+    ).encode("utf-8")
+    stage2_req = (
+        f"POST /api/upload HTTP/1.1\r\n"
+        f"Host: laravel.local\r\n"
+        f"Content-Type: multipart/form-data; boundary={boundary}\r\n"
+        f"Content-Length: 16384\r\n\r\n"
+    ).encode("utf-8") + stage2_body
+
+    proto2, dec2, _ = handler.handle(stage2_req, session_id="198.51.100.101:40001")
+    assert proto2 == "http/php2shell"
+    meta2 = _parse_audit_metadata(dec2)
+    assert meta2["stage"] == "STAGE_2_OOM_TRIGGER"
+
+    # Step 2: 攻击者切换到代理 IP 2，请求无 .php 后缀的 POST /login，不带 PHPSESSID，
+    # 在 X-Requested-With 和 Cookie 中携带 Base64 / Hex 混淆载荷
+    b64_cmd = base64.b64encode(b"<?php system('id; whoami'); ?>").decode()
+    followup_req = (
+        f"POST /login HTTP/1.1\r\n"
+        f"Host: laravel.local\r\n"
+        f"X-Requested-With: {b64_cmd}\r\n"
+        f"Cookie: custom_token=\\x73\\x79\\x73\\x74\\x65\\x6d('uname -a')\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: 7\r\n\r\n"
+        f"login=1"
+    ).encode("utf-8")
+
+    proto3, dec3, resp3 = handler.handle(followup_req, session_id="203.0.113.202:40002")
+    assert proto3 == "http/php2shell"
+    assert b"uid=33(www-data)" in resp3
+    assert b"www-data" in resp3
+    assert b"Linux ubuntu-web01" in resp3
+
+    meta3 = _parse_audit_metadata(dec3)
+    assert meta3["attack_id"] == meta2["attack_id"]
+    assert meta3["stage"] == "STAGE_3_UAF_RCE"
+    assert meta3["path"] == "/login"
+
+
+def test_concurrent_race_condition_flood_and_http_pipelining():
+    """
+    验证缺陷 4 修复：
+    1. 并发竞争型攻击（交替狂发 Stage 2 污染包与 Stage 3/4 消费包）时，attack_state.current_stage
+       保持单调递增，不会被后续到达的 Stage 2 污染包重置回退。
+    2. 同一连接使用 HTTP Pipelining 连续快速发送多个粘包请求（Stage 2 + Stage 3 粘在同一个 TCP 读缓冲中）时，
+       蜜罐会自动切分多个请求、分别推进 step_index 并合并响应，不丢包不漏记。
+    """
+    handler = HTTPHandler()
+    boundary = "----RaceFloodBoundary"
+
+    stage2_body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"\r\n\r\n'
+        f'|O:8:"stdClass":1:{{s:1:"x";i:1;}}\r\n'
+        f"--{boundary}--\r\n"
+    ).encode("utf-8")
+    stage2_req = (
+        f"POST /index.php HTTP/1.1\r\n"
+        f"Host: target.local\r\n"
+        f"Cookie: PHPSESSID=race_sid_2026\r\n"
+        f"Content-Type: multipart/form-data; boundary={boundary}\r\n"
+        f"Content-Length: {len(stage2_body)}\r\n\r\n"
+    ).encode("utf-8") + stage2_body
+
+    stage3_body = b"uaf_trigger=1&cmd=id;echo+RACE_WIN"
+    stage3_req = (
+        f"POST /index.php HTTP/1.1\r\n"
+        f"Host: target.local\r\n"
+        f"Cookie: PHPSESSID=race_sid_2026\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: {len(stage3_body)}\r\n\r\n"
+    ).encode("utf-8") + stage3_body
+
+    # 1. 测试 HTTP Pipelining：将 Stage 2 与 Stage 3 粘包一次性送入 handle()
+    pipelined_stream = stage2_req + stage3_req
+    proto_pipe, dec_pipe, resp_pipe = handler.handle(
+        pipelined_stream, session_id="198.51.100.77:55000"
+    )
+    assert proto_pipe == "http/php2shell"
+    assert b"HTTP/1.1 500 Internal Server Error" in resp_pipe
+    assert b"HTTP/1.1 200 OK" in resp_pipe
+    assert b"uid=33(www-data)" in resp_pipe
+    assert b"RACE_WIN" in resp_pipe
+
+    meta_pipe = _parse_audit_metadata(dec_pipe)
+    assert meta_pipe["pipelined_count"] == 2
+    assert meta_pipe["pipelined_stages"] == ["STAGE_2_OOM_TRIGGER", "STAGE_3_UAF_RCE"]
+    assert meta_pipe["stage"] == "STAGE_3_UAF_RCE"
+    assert meta_pipe["current_stage"] == "STAGE_3_UAF_RCE"
+    assert meta_pipe["step_index"] == 2
+
+    # 2. 随后并发脚本中的另一个线程又发来一个滞后的 Stage 2 污染包，验证 current_stage 不会从 STAGE_3 回退到 STAGE_2
+    _, dec_late_s2, _ = handler.handle(stage2_req, session_id="198.51.100.77:55001")
+    meta_late = _parse_audit_metadata(dec_late_s2)
+    assert meta_late["stage"] == "STAGE_2_OOM_TRIGGER"  # 当前包本身是 Stage 2
+    assert meta_late["current_stage"] == "STAGE_3_UAF_RCE"  # 整体攻击状态保持在 Stage 3 不回退
+
+
+def test_deformed_payloads_and_extended_recon_commands():
+    """
+    验证缺陷 5 修复：
+    1. 支持反引号命令执行（`<?php echo `id`; ?>`）
+    2. 支持 PHP 双引号变量/命令插值（`"${system('whoami')}"`、`"{${`uname -a`}}"`）
+    3. 支持十六进制转义字符串（`\\x73\\x79\\x73\\x74\\x65\\x6d`）与 `chr()` 拼接
+    4. 支持实战高频环境探测命令回显：`cat /proc/version`、`cat /proc/cpuinfo`、`env`、
+       `ip addr`、`ifconfig`、`ps aux`、`which curl wget`
+    """
+    handler = HTTPHandler()
+
+    # 构造包含多种变形语法与全部新增环境探测命令的请求
+    chr_system = ".".join(f"chr({ord(c)})" for c in "system")
+    deformed_code = (
+        '<?php '
+        'echo `id`; '
+        '$a = "${system(\'whoami\')}"; '
+        '$b = "{${`cat /proc/version`}}"; '
+        '\\x73\\x79\\x73\\x74\\x65\\x6d("cat /proc/cpuinfo; env"); '
+        f"{chr_system}('ip addr; ifconfig; ps aux; which curl wget'); "
+        '?>'
+    )
+    body = f"payload={deformed_code}".encode("utf-8")
+    req = (
+        f"POST /index.php HTTP/1.1\r\n"
+        f"Host: target.local\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: {len(body)}\r\n\r\n"
+    ).encode("utf-8") + body
+
+    proto, decoded, resp = handler.handle(req, session_id="198.51.100.88:61234")
+    assert proto == "http/php2shell"
+    resp_text = resp.decode("utf-8", errors="replace")
+
+    # 校验反引号与插值命令输出
+    assert "uid=33(www-data)" in resp_text
+    assert "www-data" in resp_text
+    # 校验新增环境探测命令回显
+    assert "Linux version 6.8.0-45-generic" in resp_text
+    assert "Intel(R) Xeon(R) Platinum" in resp_text
+    assert "SERVER_SOFTWARE=nginx/1.18.0" in resp_text
+    assert "172.17.0.2/16" in resp_text
+    assert "RX packets" in resp_text
+    assert "php-fpm: pool www" in resp_text
+    assert "/usr/bin/curl" in resp_text
+    assert "/usr/bin/wget" in resp_text
+
+    meta = _parse_audit_metadata(decoded)
+    assert meta["stage"] == "STAGE_3_UAF_RCE"
+    for expected_cmd in (
+        "id",
+        "whoami",
+        "cat /proc/version",
+        "cat /proc/cpuinfo",
+        "env",
+        "ip addr",
+        "ifconfig",
+        "ps aux",
+        "which curl wget",
+    ):
+        assert expected_cmd in meta["extracted_commands"]
+
+

@@ -187,7 +187,30 @@ class Honeypot:
         finally:
             if current_handler and hasattr(current_handler, 'cleanup'):
                 try:
-                    current_handler.cleanup(session_id)
+                    cleanup_result = current_handler.cleanup(session_id)
+                    if (
+                        cleanup_result
+                        and isinstance(cleanup_result, tuple)
+                        and len(cleanup_result) == 4
+                    ):
+                        c_proto, c_decoded, c_resp, c_raw = cleanup_result
+                        if c_resp:
+                            try:
+                                writer.write(c_resp)
+                                await writer.drain()
+                            except Exception:
+                                pass
+                        ts = datetime.now(timezone.utc)
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            None,
+                            self.storage.record,
+                            ts,
+                            real_ip,
+                            c_raw,
+                            c_decoded,
+                            c_proto,
+                        )
                 except Exception as cleanup_err:
                     print(f"Error during handler cleanup for {real_ip}: {cleanup_err}")
             try:

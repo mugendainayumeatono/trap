@@ -52,5 +52,5 @@ class HTTPHandler(ProtocolHandler):
         response = headers + body
         return "http", decoded, response
 
-    def cleanup(self, session_id: str = "") -> None:
-        self.php_engine.cleanup_session(session_id)
+    def cleanup(self, session_id: str = ""):
+        return self.php_engine.cleanup_session(session_id)
